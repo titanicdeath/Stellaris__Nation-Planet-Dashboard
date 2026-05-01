@@ -4,5 +4,6 @@
   "version-string": "0.1.1",
   "dependencies": [
     "zlib"
-  ]
+  ],
+  "builtin-baseline": "60317e6631b4301e328fffe428e6a340c0445796"
 }

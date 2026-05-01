@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -1330,6 +1331,15 @@ static void write_count_object(JsonWriter& j, const std::map<std::string, size_t
     j.end_object();
 }
 
+static void write_number_object(JsonWriter& j, const std::map<std::string, double>& counts) {
+    j.begin_object();
+    for (const auto& [type, count] : counts) {
+        j.key(type);
+        j.raw_number(json_number(count));
+    }
+    j.end_object();
+}
+
 static void write_species_counts(JsonWriter& j, const std::map<std::string, double>& counts) {
     j.begin_object();
     for (const auto& [id, count] : counts) {
@@ -1339,10 +1349,274 @@ static void write_species_counts(JsonWriter& j, const std::map<std::string, doub
     j.end_object();
 }
 
+static std::optional<double> numeric_child_or_scalar(const PdxValue* v, const std::string& child_key) {
+    if (auto direct = scalar_double(v)) return direct;
+    return scalar_double(child(v, child_key));
+}
+
+struct ColonyDemographicRollup {
+    std::map<std::string, double> pop_category_counts;
+    std::map<std::string, size_t> job_counts_by_type;
+    std::map<std::string, double> workforce_by_job_type;
+    std::map<std::string, double> species_counts_by_id;
+    std::map<std::string, double> species_counts_by_name;
+    std::map<std::string, double> enslaved_by_species_id;
+};
+
+struct PlanetSpeciesDistribution {
+    std::string planet_id;
+    std::string planet_name;
+    double pops = 0.0;
+};
+
+struct SpeciesDemographicRollup {
+    std::string species_id;
+    std::string name;
+    std::string plural;
+    std::string species_class;
+    std::string portrait;
+    std::vector<std::string> traits;
+    double total_pops = 0.0;
+    double enslaved_pops = 0.0;
+    std::vector<PlanetSpeciesDistribution> planet_distribution;
+};
+
+struct EmpireDemographicRollup {
+    double total_sapient_pops = 0.0;
+    std::map<std::string, SpeciesDemographicRollup> species;
+    std::set<std::string> species_without_resolution;
+};
+
+struct EmpireWorkforceRollup {
+    std::map<std::string, size_t> job_counts_by_type;
+    std::map<std::string, double> workforce_by_job_type;
+    std::map<std::string, double> pop_category_counts;
+    std::map<std::string, double> pop_category_share;
+    std::map<std::string, std::map<std::string, size_t>> jobs_by_planet;
+    std::map<std::string, std::map<std::string, double>> pop_categories_by_planet;
+};
+
+struct EmpireRollups {
+    EmpireDemographicRollup demographics;
+    EmpireWorkforceRollup workforce;
+    std::map<std::string, ColonyDemographicRollup> colonies;
+};
+
+static std::vector<std::string> species_trait_tokens(const PdxValue* sp) {
+    std::vector<std::string> out;
+    for (const PdxValue* tv : children(child(sp, "traits"), "trait")) {
+        std::string tok = scalar_or(tv);
+        if (!tok.empty()) out.push_back(tok);
+    }
+    return out;
+}
+
+static ColonyDemographicRollup build_colony_demographic_rollup(const std::string& planet_id,
+                                                               const PdxValue* planet,
+                                                               const SaveIndexes& ix) {
+    (void)planet_id;
+    ColonyDemographicRollup out;
+    std::map<std::string, double> species_counts_from_info;
+    std::map<std::string, double> species_counts_from_pop_groups;
+
+    if (const PdxValue* species_info = child(planet, "species_information")) {
+        for (const auto& e : species_info->entries) {
+            if (e.key.empty()) continue;
+            if (auto d = numeric_child_or_scalar(e.value, "num_pops")) species_counts_from_info[e.key] += *d;
+            if (auto d = scalar_double(child(e.value, "num_enslaved"))) out.enslaved_by_species_id[e.key] += *d;
+        }
+    }
+
+    for (const std::string& pgid : scalar_id_list_from_child(planet, "pop_groups")) {
+        auto it = ix.pop_groups.find(pgid);
+        if (it == ix.pop_groups.end()) continue;
+        const PdxValue* key = child(it->second, "key");
+        const double size = scalar_double(child(it->second, "size")).value_or(0.0);
+        const std::string category = scalar_or(child(key, "category"));
+        if (!category.empty() && size > 0.0) out.pop_category_counts[category] += size;
+        const std::string sid = scalar_or(child(key, "species"));
+        const std::string category_lower = lower_copy(category);
+        if (!sid.empty() && size > 0.0 && category_lower.find("pre_sapient") == std::string::npos) {
+            species_counts_from_pop_groups[sid] += size;
+        }
+    }
+
+    out.species_counts_by_id = !species_counts_from_pop_groups.empty() ? species_counts_from_pop_groups : species_counts_from_info;
+
+    for (const std::string& jid : scalar_id_list_from_child(planet, "pop_jobs")) {
+        auto it = ix.pop_jobs.find(jid);
+        if (it == ix.pop_jobs.end()) continue;
+        const std::string type = scalar_or(child(it->second, "type"));
+        if (type.empty()) continue;
+        out.job_counts_by_type[type]++;
+        if (auto workforce = scalar_double(child(it->second, "workforce"))) {
+            if (*workforce >= 0.0) out.workforce_by_job_type[type] += *workforce;
+        }
+    }
+
+    for (const auto& [sid, count] : out.species_counts_by_id) {
+        auto sp_it = ix.species.find(sid);
+        std::string name = sid;
+        if (sp_it != ix.species.end()) {
+            std::string resolved = localized_name(child(sp_it->second, "name"));
+            if (!resolved.empty()) name = resolved;
+        }
+        out.species_counts_by_name[name] += count;
+    }
+
+    return out;
+}
+
+static EmpireRollups build_empire_rollups(const std::vector<std::string>& owned_planets,
+                                          const SaveIndexes& ix) {
+    EmpireRollups out;
+    for (const std::string& pid : owned_planets) {
+        auto pit = ix.planets.find(pid);
+        if (pit == ix.planets.end()) continue;
+        const PdxValue* planet = pit->second;
+        ColonyDemographicRollup colony = build_colony_demographic_rollup(pid, planet, ix);
+        const std::string planet_name = localized_name(child(planet, "name"));
+
+        for (const auto& [sid, count] : colony.species_counts_by_id) {
+            auto& sp = out.demographics.species[sid];
+            if (sp.species_id.empty()) sp.species_id = sid;
+            sp.total_pops += count;
+            sp.planet_distribution.push_back(PlanetSpeciesDistribution{pid, planet_name, count});
+            auto ens = colony.enslaved_by_species_id.find(sid);
+            if (ens != colony.enslaved_by_species_id.end()) sp.enslaved_pops += ens->second;
+        }
+        for (const auto& [type, count] : colony.job_counts_by_type) {
+            out.workforce.job_counts_by_type[type] += count;
+            out.workforce.jobs_by_planet[pid][type] += count;
+        }
+        for (const auto& [type, workforce] : colony.workforce_by_job_type) {
+            out.workforce.workforce_by_job_type[type] += workforce;
+        }
+        for (const auto& [category, count] : colony.pop_category_counts) {
+            out.workforce.pop_category_counts[category] += count;
+            out.workforce.pop_categories_by_planet[pid][category] += count;
+        }
+
+        out.colonies.emplace(pid, std::move(colony));
+    }
+
+    double category_total = 0.0;
+    for (const auto& [_, count] : out.workforce.pop_category_counts) category_total += count;
+    if (category_total > 0.0) {
+        for (const auto& [category, count] : out.workforce.pop_category_counts) {
+            out.workforce.pop_category_share[category] = count / category_total;
+        }
+    }
+
+    for (auto& [sid, sp] : out.demographics.species) {
+        out.demographics.total_sapient_pops += sp.total_pops;
+        auto sp_it = ix.species.find(sid);
+        if (sp_it == ix.species.end()) {
+            out.demographics.species_without_resolution.insert(sid);
+            continue;
+        }
+        const PdxValue* obj = sp_it->second;
+        sp.name = localized_name(child(obj, "name"));
+        sp.plural = localized_name(child(obj, "plural"));
+        sp.species_class = scalar_or(child(obj, "class"));
+        sp.portrait = scalar_or(child(obj, "portrait"));
+        sp.traits = species_trait_tokens(obj);
+    }
+
+    return out;
+}
+
+static void write_nested_count_object(JsonWriter& j, const std::map<std::string, std::map<std::string, size_t>>& counts) {
+    j.begin_object();
+    for (const auto& [outer, inner] : counts) {
+        j.key(outer);
+        write_count_object(j, inner);
+    }
+    j.end_object();
+}
+
+static void write_nested_number_object(JsonWriter& j, const std::map<std::string, std::map<std::string, double>>& counts) {
+    j.begin_object();
+    for (const auto& [outer, inner] : counts) {
+        j.key(outer);
+        write_number_object(j, inner);
+    }
+    j.end_object();
+}
+
+static void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographics) {
+    std::string dominant_species_id;
+    double dominant_species_count = -1.0;
+    for (const auto& [sid, sp] : demographics.species) {
+        if (sp.total_pops > dominant_species_count) {
+            dominant_species_id = sid;
+            dominant_species_count = sp.total_pops;
+        }
+    }
+
+    j.key("demographics");
+    j.begin_object();
+    j.key("total_sapient_pops"); j.raw_number(json_number(demographics.total_sapient_pops));
+    j.key("species_count"); j.raw_number(std::to_string(demographics.species.size()));
+    j.key("dominant_species_id"); j.value(dominant_species_id);
+    j.key("dominant_species_name");
+    auto dom_it = demographics.species.find(dominant_species_id);
+    if (dom_it != demographics.species.end()) j.value(dom_it->second.name);
+    else j.value("");
+    j.key("species");
+    j.begin_array();
+    for (const auto& [_, sp] : demographics.species) {
+        j.begin_object();
+        j.key("species_id"); j.value(sp.species_id);
+        j.key("name"); j.value(sp.name);
+        j.key("plural"); j.value(sp.plural);
+        j.key("class"); j.value(sp.species_class);
+        j.key("portrait"); j.value(sp.portrait);
+        j.key("traits");
+        j.begin_array();
+        for (const std::string& trait : sp.traits) j.value(trait);
+        j.end_array();
+        j.key("total_pops"); j.raw_number(json_number(sp.total_pops));
+        j.key("empire_share");
+        if (demographics.total_sapient_pops > 0.0) j.raw_number(json_number(sp.total_pops / demographics.total_sapient_pops));
+        else j.raw_number("0");
+        if (sp.enslaved_pops > 0.0) {
+            j.key("enslaved_pops");
+            j.raw_number(json_number(sp.enslaved_pops));
+        }
+        j.key("planet_distribution");
+        j.begin_array();
+        for (const auto& dist : sp.planet_distribution) {
+            j.begin_object();
+            j.key("planet_id"); j.value(dist.planet_id);
+            j.key("planet_name"); j.value(dist.planet_name);
+            j.key("pops"); j.raw_number(json_number(dist.pops));
+            j.end_object();
+        }
+        j.end_array();
+        j.end_object();
+    }
+    j.end_array();
+    j.end_object();
+}
+
+static void write_workforce_summary(JsonWriter& j, const EmpireWorkforceRollup& workforce) {
+    j.key("workforce_summary");
+    j.begin_object();
+    j.key("job_counts_by_type"); write_count_object(j, workforce.job_counts_by_type);
+    j.key("workforce_by_job_type"); write_number_object(j, workforce.workforce_by_job_type);
+    j.key("pop_category_counts"); write_number_object(j, workforce.pop_category_counts);
+    j.key("pop_category_share"); write_number_object(j, workforce.pop_category_share);
+    j.key("jobs_by_planet"); write_nested_count_object(j, workforce.jobs_by_planet);
+    j.key("pop_categories_by_planet"); write_nested_number_object(j, workforce.pop_categories_by_planet);
+    j.end_object();
+}
+
 static void write_colony_derived_summary(JsonWriter& j,
                                          const std::string& planet_id,
                                          const PdxValue* planet,
                                          const SaveIndexes& ix,
+                                         const ColonyDemographicRollup* colony_rollup,
                                          const std::string& capital_id) {
     std::string planet_name = localized_name(child(planet, "name"));
     std::string system_id = scalar_or(child(child(planet, "coordinate"), "origin"));
@@ -1361,7 +1635,7 @@ static void write_colony_derived_summary(JsonWriter& j,
     if (const PdxValue* species_info = child(planet, "species_information")) {
         for (const auto& e : species_info->entries) {
             if (e.key.empty()) continue;
-            if (auto d = scalar_double(e.value)) species_counts[e.key] += *d;
+            if (auto d = numeric_child_or_scalar(e.value, "num_pops")) species_counts[e.key] += *d;
         }
     }
     if (species_counts.empty()) {
@@ -1372,6 +1646,9 @@ static void write_colony_derived_summary(JsonWriter& j,
             auto size = scalar_double(child(it->second, "size"));
             if (!sid.empty() && size) species_counts[sid] += *size;
         }
+    }
+    if (colony_rollup && !colony_rollup->species_counts_by_id.empty()) {
+        species_counts = colony_rollup->species_counts_by_id;
     }
 
     std::string dominant_species_id;
@@ -1413,6 +1690,18 @@ static void write_colony_derived_summary(JsonWriter& j,
     j.key("building_counts_by_type"); write_count_object(j, building_counts);
     j.key("deposit_counts_by_type"); write_count_object(j, deposit_counts);
     j.key("species_counts_by_id"); write_species_counts(j, species_counts);
+    j.key("pop_category_counts");
+    if (colony_rollup) write_number_object(j, colony_rollup->pop_category_counts);
+    else { j.begin_object(); j.end_object(); }
+    j.key("job_counts_by_type");
+    if (colony_rollup) write_count_object(j, colony_rollup->job_counts_by_type);
+    else { j.begin_object(); j.end_object(); }
+    j.key("workforce_by_job_type");
+    if (colony_rollup) write_number_object(j, colony_rollup->workforce_by_job_type);
+    else { j.begin_object(); j.end_object(); }
+    j.key("species_counts_by_name");
+    if (colony_rollup) write_number_object(j, colony_rollup->species_counts_by_name);
+    else { j.begin_object(); j.end_object(); }
     if (!dominant_species_id.empty()) { j.key("dominant_species_id"); j.value(dominant_species_id); }
     if (!dominant_species_name.empty()) { j.key("dominant_species_name"); j.value(dominant_species_name); }
     j.key("species_count"); j.raw_number(std::to_string(species_counts.size()));
@@ -1449,7 +1738,7 @@ static void write_colony_derived_summary(JsonWriter& j,
     j.end_object();
 }
 
-static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
+static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, const ColonyDemographicRollup* colony_rollup, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
     j.begin_object();
     j.key("planet_id"); j.value(planet_id);
     j.key("name"); j.value(localized_name(child(planet, "name")));
@@ -1667,7 +1956,7 @@ static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxV
     if (const PdxValue* mods = child(planet, "planet_modifier")) { j.key("planet_modifiers"); write_pdx_as_json(j, mods); }
     if (const PdxValue* flags = child(planet, "flags")) { j.key("flags"); write_pdx_as_json(j, flags); }
 
-    write_colony_derived_summary(j, planet_id, planet, ix, capital_id);
+    write_colony_derived_summary(j, planet_id, planet, ix, colony_rollup, capital_id);
 
     if (st.include_source_locations) { j.key("source"); write_source(j, planet); }
     if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, planet); }
@@ -1787,6 +2076,10 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     std::string ruler = scalar_or(child(country, "ruler"));
     if (!ruler.empty() && ruler != "4294967295") referenced_leaders.insert(ruler);
 
+    const std::vector<std::string> owned_planets = scalar_id_list_from_child(country, "owned_planets");
+    EmpireRollups rollups = build_empire_rollups(owned_planets, ix);
+    for (const auto& [sid, _] : rollups.demographics.species) referenced_species.insert(sid);
+
     j.begin_object();
     j.key("schema_version"); j.value("dashboard-country-v0.1");
     j.key("parser_version"); j.value(STELLARIS_PARSER_VERSION);
@@ -1831,7 +2124,10 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
         summary.capital_name = localized_name(child(capital_it->second, "name"));
-        write_planet(j, capital_id, capital_it->second, ix, st, defs, capital_id, referenced_species, referenced_leaders);
+        const ColonyDemographicRollup* capital_rollup = nullptr;
+        auto cr_it = rollups.colonies.find(capital_id);
+        if (cr_it != rollups.colonies.end()) capital_rollup = &cr_it->second;
+        write_planet(j, capital_id, capital_it->second, ix, st, defs, capital_id, capital_rollup, referenced_species, referenced_leaders);
     } else {
         if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
         j.value(nullptr);
@@ -1839,17 +2135,22 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
 
     j.key("colonies");
     j.begin_array();
-    const std::vector<std::string> owned_planets = scalar_id_list_from_child(country, "owned_planets");
     summary.owned_planets = owned_planets.size();
     std::vector<std::string> colonies_missing_derived_summary;
+    std::vector<std::string> colonies_missing_demographic_summary;
     for (const std::string& pid : owned_planets) {
         auto it = ix.planets.find(pid);
         if (it != ix.planets.end()) {
-            write_planet(j, pid, it->second, ix, st, defs, capital_id, referenced_species, referenced_leaders);
+            const ColonyDemographicRollup* colony_rollup = nullptr;
+            auto rollup_it = rollups.colonies.find(pid);
+            if (rollup_it != rollups.colonies.end()) colony_rollup = &rollup_it->second;
+            else colonies_missing_demographic_summary.push_back(pid);
+            write_planet(j, pid, it->second, ix, st, defs, capital_id, colony_rollup, referenced_species, referenced_leaders);
             summary.exported_colonies++;
         } else {
             add_unresolved("planet", pid, "country.owned_planets");
             colonies_missing_derived_summary.push_back(pid);
+            colonies_missing_demographic_summary.push_back(pid);
             j.begin_object(); j.key("planet_id"); j.value(pid); j.key("resolved"); j.value(false); j.end_object();
         }
     }
@@ -1859,6 +2160,9 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.begin_array();
     for (const std::string& pid : scalar_id_list_from_child(country, "controlled_planets")) j.value(pid);
     j.end_array();
+
+    write_demographics(j, rollups.demographics);
+    write_workforce_summary(j, rollups.workforce);
 
     j.key("fleets");
     j.begin_array();
@@ -1944,6 +2248,15 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.begin_object();
     j.key("owned_planets_match_exported_colonies"); j.value(summary.owned_planets == summary.exported_colonies);
     j.key("capital_in_colonies"); j.value(capital_id.empty() || std::find(owned_planets.begin(), owned_planets.end(), capital_id) != owned_planets.end());
+    j.key("demographics_species_count"); j.raw_number(std::to_string(rollups.demographics.species.size()));
+    j.key("demographics_total_pops"); j.raw_number(json_number(rollups.demographics.total_sapient_pops));
+    j.key("demographics_matches_country_pop_count");
+    if (auto country_pops = scalar_double(child(country, "num_sapient_pops"))) {
+        const double tolerance = std::max(1.0, std::abs(*country_pops) * 0.001);
+        j.value(std::abs(rollups.demographics.total_sapient_pops - *country_pops) <= tolerance);
+    } else {
+        j.value(false);
+    }
     j.end_object();
     j.end_object();
 
@@ -1958,6 +2271,23 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.key("colonies_missing_derived_summary");
     j.begin_array();
     for (const std::string& pid : colonies_missing_derived_summary) j.value(pid);
+    j.end_array();
+    j.key("demographics_species_count"); j.raw_number(std::to_string(rollups.demographics.species.size()));
+    j.key("demographics_total_pops"); j.raw_number(json_number(rollups.demographics.total_sapient_pops));
+    j.key("demographics_matches_country_pop_count");
+    if (auto country_pops = scalar_double(child(country, "num_sapient_pops"))) {
+        const double tolerance = std::max(1.0, std::abs(*country_pops) * 0.001);
+        j.value(std::abs(rollups.demographics.total_sapient_pops - *country_pops) <= tolerance);
+    } else {
+        j.value(false);
+    }
+    j.key("colonies_missing_demographic_summary");
+    j.begin_array();
+    for (const std::string& pid : colonies_missing_demographic_summary) j.value(pid);
+    j.end_array();
+    j.key("species_without_resolution");
+    j.begin_array();
+    for (const std::string& sid : rollups.demographics.species_without_resolution) j.value(sid);
     j.end_array();
     j.end_object();
 
