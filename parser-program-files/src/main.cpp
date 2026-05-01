@@ -219,6 +219,9 @@ struct Settings {
     bool include_raw_pdx_objects = false;
     bool export_timeline = true;
 
+    bool print_performance_timings = false;
+    bool write_performance_log = false;
+
     std::string settings_hash;
 };
 
@@ -294,6 +297,9 @@ static Settings load_settings(const fs::path& config_path) {
     st.include_source_locations = getb("output", "include_source_locations", true);
     st.include_raw_pdx_objects = getb("output", "include_raw_pdx_objects", false);
     st.export_timeline = getb("output", "export_timeline", true);
+
+    st.print_performance_timings = getb("debug", "print_performance_timings", false);
+    st.write_performance_log = getb("debug", "write_performance_log", false);
 
     return st;
 }
@@ -1023,6 +1029,7 @@ struct CountryExportSummary {
     std::string capital_name;
     size_t owned_planets = 0;
     size_t exported_colonies = 0;
+    size_t systems_exported = 0;
     size_t unresolved_references = 0;
     size_t warnings = 0;
     fs::path output_file;
@@ -2306,6 +2313,7 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     EmpireRollups rollups = build_empire_rollups(owned_planets, ix);
     for (const auto& [sid, _] : rollups.demographics.species) referenced_species.insert(sid);
     MapExportContext map_context = build_map_export_context(owned_planets, controlled_planets, owned_fleet_ids, capital_id, ix);
+    summary.systems_exported = map_context.systems.size();
 
     j.begin_object();
     j.key("schema_version"); j.value("dashboard-country-v0.1");
@@ -2673,8 +2681,192 @@ static std::string output_date_folder(const std::string& date) {
     return d;
 }
 
+struct CountryPerformance {
+    std::string country_id;
+    std::string country_name;
+    size_t exported_colonies = 0;
+    size_t systems_exported = 0;
+    fs::path output_file;
+    double export_seconds = 0.0;
+};
+
+struct SavePerformance {
+    std::string save_file;
+    bool skipped = false;
+    size_t gamestate_bytes = 0;
+    size_t indexed_countries = 0;
+    size_t indexed_planets = 0;
+    size_t indexed_species = 0;
+    size_t indexed_fleets = 0;
+    size_t indexed_armies = 0;
+    size_t selected_countries = 0;
+    double manifest_check_seconds = 0.0;
+    double load_gamestate_seconds = 0.0;
+    double parse_document_seconds = 0.0;
+    double build_indexes_seconds = 0.0;
+    double select_countries_seconds = 0.0;
+    double export_countries_seconds = 0.0;
+    double timeline_point_seconds = 0.0;
+    double manifest_write_seconds = 0.0;
+    double save_total_seconds = 0.0;
+    std::vector<CountryPerformance> countries;
+};
+
+struct RunPerformance {
+    size_t saves_considered = 0;
+    size_t saves_parsed = 0;
+    size_t saves_skipped = 0;
+    size_t total_gamestate_bytes = 0;
+    double total_manifest_check_seconds = 0.0;
+    double total_load_gamestate_seconds = 0.0;
+    double total_parse_document_seconds = 0.0;
+    double total_build_indexes_seconds = 0.0;
+    double total_select_countries_seconds = 0.0;
+    double total_export_countries_seconds = 0.0;
+    double total_timeline_point_seconds = 0.0;
+    double total_manifest_write_seconds = 0.0;
+    double total_timeline_write_seconds = 0.0;
+    double total_run_seconds = 0.0;
+};
+
+static double elapsed_seconds(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double>(end - start).count();
+}
+
+static double elapsed_seconds_since(std::chrono::steady_clock::time_point start) {
+    return elapsed_seconds(start, std::chrono::steady_clock::now());
+}
+
+static std::string format_seconds(double seconds) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(3) << seconds << "s";
+    return ss.str();
+}
+
+static void print_perf_line(const std::string& label, double seconds) {
+    std::cout << "  " << label << ": " << format_seconds(seconds) << "\n";
+}
+
+static void print_save_performance(const SavePerformance& perf) {
+    std::cout << "[perf] " << perf.save_file << "\n";
+    if (perf.skipped) std::cout << "  skipped: true\n";
+    std::cout << "  gamestate_bytes: " << perf.gamestate_bytes << "\n";
+    std::cout << "  indexed_countries: " << perf.indexed_countries << "\n";
+    std::cout << "  indexed_planets: " << perf.indexed_planets << "\n";
+    std::cout << "  indexed_species: " << perf.indexed_species << "\n";
+    std::cout << "  indexed_fleets: " << perf.indexed_fleets << "\n";
+    std::cout << "  indexed_armies: " << perf.indexed_armies << "\n";
+    std::cout << "  selected_countries: " << perf.selected_countries << "\n";
+    print_perf_line("manifest_check", perf.manifest_check_seconds);
+    print_perf_line("load_gamestate", perf.load_gamestate_seconds);
+    print_perf_line("parse_document", perf.parse_document_seconds);
+    print_perf_line("build_indexes", perf.build_indexes_seconds);
+    print_perf_line("select_countries", perf.select_countries_seconds);
+    for (const auto& country : perf.countries) {
+        std::cout << "  export_country[" << country.country_id << "]: " << format_seconds(country.export_seconds) << "\n";
+        std::cout << "    name: " << country.country_name << "\n";
+        std::cout << "    exported_colonies: " << country.exported_colonies << "\n";
+        std::cout << "    systems_exported: " << country.systems_exported << "\n";
+        std::cout << "    output_path: " << country.output_file << "\n";
+    }
+    print_perf_line("export_countries_total", perf.export_countries_seconds);
+    print_perf_line("timeline_point_record", perf.timeline_point_seconds);
+    print_perf_line("manifest_write", perf.manifest_write_seconds);
+    print_perf_line("save_total", perf.save_total_seconds);
+}
+
+static void print_total_performance(const RunPerformance& perf) {
+    std::cout << "[perf] total\n";
+    std::cout << "  saves_considered: " << perf.saves_considered << "\n";
+    std::cout << "  saves_parsed: " << perf.saves_parsed << "\n";
+    std::cout << "  saves_skipped: " << perf.saves_skipped << "\n";
+    std::cout << "  total_gamestate_bytes: " << perf.total_gamestate_bytes << "\n";
+    print_perf_line("total_manifest_check", perf.total_manifest_check_seconds);
+    print_perf_line("total_load_gamestate", perf.total_load_gamestate_seconds);
+    print_perf_line("total_parse_document", perf.total_parse_document_seconds);
+    print_perf_line("total_build_indexes", perf.total_build_indexes_seconds);
+    print_perf_line("total_select_countries", perf.total_select_countries_seconds);
+    print_perf_line("total_export_countries", perf.total_export_countries_seconds);
+    print_perf_line("total_timeline_point_record", perf.total_timeline_point_seconds);
+    print_perf_line("total_manifest_write", perf.total_manifest_write_seconds);
+    print_perf_line("total_timeline_write", perf.total_timeline_write_seconds);
+    print_perf_line("total_run", perf.total_run_seconds);
+}
+
+static void write_duration_field(JsonWriter& j, const std::string& key, double seconds) {
+    j.key(key);
+    j.raw_number(json_number(seconds));
+}
+
+static void write_performance_log(const fs::path& path, const std::vector<SavePerformance>& saves, const RunPerformance& total, bool pretty) {
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("Could not write performance log: " + path.string());
+    JsonWriter j(out, pretty);
+    j.begin_object();
+    j.key("schema_version"); j.value("stellaris-parser-performance-v0.1");
+    j.key("saves"); j.begin_array();
+    for (const auto& save : saves) {
+        j.begin_object();
+        j.key("save_file"); j.value(save.save_file);
+        j.key("skipped"); j.value(save.skipped);
+        j.key("gamestate_bytes"); j.raw_number(std::to_string(save.gamestate_bytes));
+        j.key("indexed_countries"); j.raw_number(std::to_string(save.indexed_countries));
+        j.key("indexed_planets"); j.raw_number(std::to_string(save.indexed_planets));
+        j.key("indexed_species"); j.raw_number(std::to_string(save.indexed_species));
+        j.key("indexed_fleets"); j.raw_number(std::to_string(save.indexed_fleets));
+        j.key("indexed_armies"); j.raw_number(std::to_string(save.indexed_armies));
+        j.key("selected_countries"); j.raw_number(std::to_string(save.selected_countries));
+        j.key("timings_seconds"); j.begin_object();
+        write_duration_field(j, "manifest_check", save.manifest_check_seconds);
+        write_duration_field(j, "load_gamestate", save.load_gamestate_seconds);
+        write_duration_field(j, "parse_document", save.parse_document_seconds);
+        write_duration_field(j, "build_indexes", save.build_indexes_seconds);
+        write_duration_field(j, "select_countries", save.select_countries_seconds);
+        write_duration_field(j, "export_countries_total", save.export_countries_seconds);
+        write_duration_field(j, "timeline_point_record", save.timeline_point_seconds);
+        write_duration_field(j, "manifest_write", save.manifest_write_seconds);
+        write_duration_field(j, "save_total", save.save_total_seconds);
+        j.end_object();
+        j.key("countries"); j.begin_array();
+        for (const auto& country : save.countries) {
+            j.begin_object();
+            j.key("country_id"); j.value(country.country_id);
+            j.key("country_name"); j.value(country.country_name);
+            j.key("exported_colonies"); j.raw_number(std::to_string(country.exported_colonies));
+            j.key("systems_exported"); j.raw_number(std::to_string(country.systems_exported));
+            j.key("output_path"); j.value(fs::absolute(country.output_file).string());
+            write_duration_field(j, "export_seconds", country.export_seconds);
+            j.end_object();
+        }
+        j.end_array();
+        j.end_object();
+    }
+    j.end_array();
+    j.key("total"); j.begin_object();
+    j.key("saves_considered"); j.raw_number(std::to_string(total.saves_considered));
+    j.key("saves_parsed"); j.raw_number(std::to_string(total.saves_parsed));
+    j.key("saves_skipped"); j.raw_number(std::to_string(total.saves_skipped));
+    j.key("total_gamestate_bytes"); j.raw_number(std::to_string(total.total_gamestate_bytes));
+    j.key("timings_seconds"); j.begin_object();
+    write_duration_field(j, "total_manifest_check", total.total_manifest_check_seconds);
+    write_duration_field(j, "total_load_gamestate", total.total_load_gamestate_seconds);
+    write_duration_field(j, "total_parse_document", total.total_parse_document_seconds);
+    write_duration_field(j, "total_build_indexes", total.total_build_indexes_seconds);
+    write_duration_field(j, "total_select_countries", total.total_select_countries_seconds);
+    write_duration_field(j, "total_export_countries", total.total_export_countries_seconds);
+    write_duration_field(j, "total_timeline_point_record", total.total_timeline_point_seconds);
+    write_duration_field(j, "total_manifest_write", total.total_manifest_write_seconds);
+    write_duration_field(j, "total_timeline_write", total.total_timeline_write_seconds);
+    write_duration_field(j, "total_run", total.total_run_seconds);
+    j.end_object();
+    j.end_object();
+    j.end_object();
+}
+
 int main(int argc, char** argv) {
     try {
+        const auto run_start = std::chrono::steady_clock::now();
         fs::path config = "settings.config";
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -2710,28 +2902,67 @@ int main(int argc, char** argv) {
         }
 
         std::unordered_map<std::string, std::vector<TimelinePoint>> timeline_by_country;
+        std::vector<SavePerformance> save_performances;
+        RunPerformance run_perf;
         for (const fs::path& save_path : saves) {
+            const auto save_start = std::chrono::steady_clock::now();
+            SavePerformance save_perf;
+            save_perf.save_file = save_path.filename().string();
+            run_perf.saves_considered++;
             std::cout << "\n=== " << save_path.filename().string() << " ===\n";
+
+            const auto manifest_check_start = std::chrono::steady_clock::now();
             const std::string save_hash = file_hash_fnv1a64(save_path);
             if (should_skip_from_manifest(st, manifest, save_path, save_hash)) {
+                save_perf.skipped = true;
+                save_perf.manifest_check_seconds = elapsed_seconds_since(manifest_check_start);
+                save_perf.save_total_seconds = elapsed_seconds_since(save_start);
+                run_perf.saves_skipped++;
+                run_perf.total_manifest_check_seconds += save_perf.manifest_check_seconds;
                 std::cout << "Skipping; manifest says this save/settings combination was already parsed.\n";
+                if (st.print_performance_timings) print_save_performance(save_perf);
+                save_performances.push_back(std::move(save_perf));
                 continue;
             }
+            save_perf.manifest_check_seconds = elapsed_seconds_since(manifest_check_start);
+            run_perf.saves_parsed++;
+            run_perf.total_manifest_check_seconds += save_perf.manifest_check_seconds;
 
             std::cout << "Loading gamestate...\n";
+            const auto load_start = std::chrono::steady_clock::now();
             std::string gamestate = load_gamestate_for_save(st, save_path);
+            save_perf.load_gamestate_seconds = elapsed_seconds_since(load_start);
+            run_perf.total_load_gamestate_seconds += save_perf.load_gamestate_seconds;
+            save_perf.gamestate_bytes = gamestate.size();
+            run_perf.total_gamestate_bytes += save_perf.gamestate_bytes;
+
             std::cout << "Parsing " << gamestate.size() << " bytes...\n";
+            const auto parse_start = std::chrono::steady_clock::now();
             PdxParser parser(gamestate);
             PdxDocument doc = parser.parse_document();
+            save_perf.parse_document_seconds = elapsed_seconds_since(parse_start);
+            run_perf.total_parse_document_seconds += save_perf.parse_document_seconds;
             gamestate.clear();
             gamestate.shrink_to_fit();
 
+            const auto index_start = std::chrono::steady_clock::now();
             SaveIndexes ix = build_indexes(&doc.root);
+            save_perf.build_indexes_seconds = elapsed_seconds_since(index_start);
+            run_perf.total_build_indexes_seconds += save_perf.build_indexes_seconds;
+            save_perf.indexed_countries = ix.countries.size();
+            save_perf.indexed_planets = ix.planets.size();
+            save_perf.indexed_species = ix.species.size();
+            save_perf.indexed_fleets = ix.fleets.size();
+            save_perf.indexed_armies = ix.armies.size();
             std::string game_date = scalar_or(child(&doc.root, "date"));
             std::cout << "Game date: " << game_date << "\n";
             std::cout << "Indexed countries=" << ix.countries.size() << " planets=" << ix.planets.size() << " species=" << ix.species.size() << "\n";
 
+            const auto select_start = std::chrono::steady_clock::now();
             std::vector<std::string> selected = select_country_ids(st, ix);
+            save_perf.select_countries_seconds = elapsed_seconds_since(select_start);
+            run_perf.total_select_countries_seconds += save_perf.select_countries_seconds;
+            save_perf.selected_countries = selected.size();
             std::cout << "Selected countries: " << selected.size() << "\n";
 
             ManifestEntry me;
@@ -2742,6 +2973,7 @@ int main(int argc, char** argv) {
             me.parsed_at = now_iso8601();
 
             fs::path date_dir = st.output_path / output_date_folder(game_date);
+            const auto export_start = std::chrono::steady_clock::now();
             for (const std::string& cid : selected) {
                 auto it = ix.countries.find(cid);
                 if (it == ix.countries.end()) {
@@ -2750,10 +2982,24 @@ int main(int argc, char** argv) {
                 }
                 std::string cname = get_country_name(it->second);
                 fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ").json");
+                const auto country_export_start = std::chrono::steady_clock::now();
                 auto result = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                const double country_export_seconds = elapsed_seconds_since(country_export_start);
                 CountryExportSummary s = result.first;
                 TimelinePoint tp = result.second;
+                const auto timeline_point_start = std::chrono::steady_clock::now();
                 timeline_by_country[cid].push_back(tp);
+                save_perf.timeline_point_seconds += elapsed_seconds_since(timeline_point_start);
+
+                CountryPerformance country_perf;
+                country_perf.country_id = s.country_id;
+                country_perf.country_name = s.country_name;
+                country_perf.exported_colonies = s.exported_colonies;
+                country_perf.systems_exported = s.systems_exported;
+                country_perf.output_file = out_file;
+                country_perf.export_seconds = country_export_seconds;
+                save_perf.countries.push_back(std::move(country_perf));
+
                 std::cout << "Save: " << game_date << "\n";
                 std::cout << "Selected countries: " << selected.size() << "\n";
                 std::cout << "  Country " << s.country_id << ": " << s.country_name << "\n";
@@ -2769,16 +3015,26 @@ int main(int argc, char** argv) {
                 std::cout << "    Wrote: " << out_file << "\n";
                 me.outputs.push_back(fs::absolute(out_file).string());
             }
+            save_perf.export_countries_seconds = elapsed_seconds_since(export_start);
+            run_perf.total_export_countries_seconds += save_perf.export_countries_seconds;
+            run_perf.total_timeline_point_seconds += save_perf.timeline_point_seconds;
 
             // Replace older manifest entry for this save hash/settings combo, then append the new one.
+            const auto manifest_write_start = std::chrono::steady_clock::now();
             manifest.erase(std::remove_if(manifest.begin(), manifest.end(), [&](const ManifestEntry& e) {
                 return e.save_path == me.save_path && e.save_hash == me.save_hash && e.settings_hash == me.settings_hash;
             }), manifest.end());
             manifest.push_back(std::move(me));
             save_manifest(st.manifest_path, manifest, st.pretty_json);
+            save_perf.manifest_write_seconds = elapsed_seconds_since(manifest_write_start);
+            run_perf.total_manifest_write_seconds += save_perf.manifest_write_seconds;
+            save_perf.save_total_seconds = elapsed_seconds_since(save_start);
+            if (st.print_performance_timings) print_save_performance(save_perf);
+            save_performances.push_back(std::move(save_perf));
         }
 
         if (st.export_timeline) {
+            const auto timeline_write_start = std::chrono::steady_clock::now();
             fs::path timeline_dir = st.output_path / "timeline";
             for (auto& kv : timeline_by_country) {
                 if (kv.second.empty()) continue;
@@ -2823,6 +3079,16 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("Exported invalid timeline JSON: " + tfile.string());
                 }
             }
+            run_perf.total_timeline_write_seconds = elapsed_seconds_since(timeline_write_start);
+        }
+        run_perf.total_run_seconds = elapsed_seconds_since(run_start);
+
+        if (st.print_performance_timings) {
+            print_total_performance(run_perf);
+        }
+
+        if (st.write_performance_log) {
+            write_performance_log(st.output_path / "performance-log.json", save_performances, run_perf, st.pretty_json);
         }
 
         std::cout << "\nDone. Manifest: " << st.manifest_path << "\n";
