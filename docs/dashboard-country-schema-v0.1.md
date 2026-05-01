@@ -45,10 +45,36 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - identity (`planet_id`, `name`, ownership)
 - economy/planet state fields where available
 - building/district/deposit/pop summaries
+- `derived_summary` for dashboard-ready colony facts and card display
 - optional governor details
 - optional local source/raw sections (depending on config)
 
 If a referenced planet cannot be resolved, a placeholder object with `resolved=false` is emitted and an unresolved warning entry is added.
+
+### Colony `derived_summary`
+
+Each resolved colony object includes `derived_summary` without removing or rewriting the detailed/raw colony sections. Fields are emitted when the source save data or resolved indexes make them available:
+
+- identity/location: `planet_id`, `planet_name`, `system_id`, `system_name`
+- classification: `planet_class`, `planet_size`, `designation`, `final_designation`
+- ownership/state: `owner`, `controller`, `stability`, `crime`
+- capacity: `amenities`, `amenities_usage`, `free_amenities`, `total_housing`, `housing_usage`, `free_housing`
+- pops: `num_sapient_pops`, `employable_pops`, `species_counts_by_id`, `dominant_species_id`, `dominant_species_name`, `species_count`
+- economy: `production`, `upkeep`, `profit`
+- local composition: `district_counts_by_type`, `building_counts_by_type`, `deposit_counts_by_type`
+- diagnostics: `warning_count`
+
+`derived_summary.presentation_card` is a stable compact display object for dashboard cards:
+
+- `title`: planet name when available, otherwise planet ID.
+- `subtitle`: designation, planet class, and size joined as display text when available.
+- `system`: resolved system name, or an empty string when unresolved.
+- `role`: inferred colony role.
+- `primary_metric_label`: currently `Pops`.
+- `primary_metric_value`: `num_sapient_pops` when available, otherwise `null`.
+- `secondary_metrics`: stable object with `stability`, `crime`, `free_housing`, and `free_amenities`, using `null` for unavailable values.
+
+Role inference is deterministic and conservative. Capital planets, including `col_capital`, are `Capital`. Otherwise the parser scores obvious production keys and district/building type tokens for forge/alloy, factory/consumer goods, mining/minerals, generator/energy, research, unity, and trade signals. A single strongest signal maps to `Forge`, `Factory`, `Mining`, `Generator`, `Research`, `Unity`, or `Trade`; ties or missing signals map to `Mixed`.
 
 ## `species` and `leaders`
 
@@ -85,6 +111,18 @@ Current warning payload:
   - `id`
   - `context` (source field path in export logic)
 
+## `validation`
+
+Current top-level validation fields include:
+
+- `owned_planets_match_exported_colonies`
+- `capital_in_colonies`
+- `unresolved_reference_count`
+- `warning_count`
+- `colonies_missing_systems`
+- `colonies_with_owner_mismatch`
+- `colonies_missing_derived_summary`: colony IDs that did not receive `colonies[].derived_summary`; normally empty for resolved colonies.
+
 
 ## New in Milestone 3
 
@@ -92,3 +130,10 @@ Current warning payload:
 - Added top-level `validation` block with unresolved/warning counts and consistency checks.
 - Added optional timeline index export under `output/timeline/<country-id>-(<safe-name>).timeline.json`.
 - Timeline snapshots include key metrics plus `output_json_path` pointing to the full per-save self-contained country snapshot.
+
+## New in Milestone 3B-1
+
+- Added per-colony `derived_summary` objects for resolved `colonies[]` entries.
+- Added per-colony `derived_summary.presentation_card` for compact dashboard card rendering.
+- Added simple colony role inference for `Capital`, `Forge`, `Factory`, `Mining`, `Generator`, `Research`, `Unity`, `Trade`, and `Mixed`.
+- Added `validation.colonies_missing_derived_summary`.

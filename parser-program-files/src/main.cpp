@@ -1177,7 +1177,279 @@ static void write_system_summary(JsonWriter& j, const std::string& id, const Pdx
     j.end_object();
 }
 
-static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
+static std::optional<double> scalar_double(const PdxValue* v) {
+    auto s = scalar(v);
+    if (!s) return std::nullopt;
+    try {
+        size_t pos = 0;
+        double d = std::stod(*s, &pos);
+        if (pos != s->size()) return std::nullopt;
+        return d;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static std::string json_number(double v) {
+    std::ostringstream ss;
+    ss << std::setprecision(15) << v;
+    return ss.str();
+}
+
+static void write_optional_child(JsonWriter& j, const PdxValue* obj, const std::string& source_key, const std::string& output_key) {
+    if (const PdxValue* v = child(obj, source_key)) {
+        j.key(output_key);
+        write_pdx_as_json(j, v);
+    }
+}
+
+static void write_metric_or_null(JsonWriter& j, const PdxValue* obj, const std::string& key) {
+    j.key(key);
+    if (const PdxValue* v = child(obj, key)) write_pdx_as_json(j, v);
+    else j.value(nullptr);
+}
+
+static std::string display_token(std::string token) {
+    if (starts_with_ci(token, "pc_")) token = token.substr(3);
+    if (starts_with_ci(token, "col_")) token = token.substr(4);
+    std::replace(token.begin(), token.end(), '_', ' ');
+    bool cap_next = true;
+    for (char& c : token) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            cap_next = true;
+        } else if (cap_next) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            cap_next = false;
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return token;
+}
+
+static void add_type_counts(std::map<std::string, size_t>& counts,
+                            const std::vector<std::string>& ids,
+                            const std::unordered_map<std::string, const PdxValue*>& index) {
+    for (const std::string& id : ids) {
+        auto it = index.find(id);
+        if (it == index.end()) continue;
+        std::string type = scalar_or(child(it->second, "type"));
+        if (!type.empty()) counts[type]++;
+    }
+}
+
+static double sum_resource_like(const PdxValue* v, const std::vector<std::string>& needles) {
+    if (!v) return 0.0;
+    if (v->kind != PdxValue::Kind::Container) return 0.0;
+    double total = 0.0;
+    for (const auto& e : v->entries) {
+        std::string key = lower_copy(e.key);
+        bool key_matches = false;
+        for (const std::string& needle : needles) {
+            if (key.find(needle) != std::string::npos) {
+                key_matches = true;
+                break;
+            }
+        }
+        if (key_matches) {
+            if (auto d = scalar_double(e.value)) total += *d;
+        }
+        total += sum_resource_like(e.value, needles);
+    }
+    return total;
+}
+
+static double count_type_matches(const std::map<std::string, size_t>& counts, const std::vector<std::string>& needles) {
+    double total = 0.0;
+    for (const auto& [type, count] : counts) {
+        std::string t = lower_copy(type);
+        for (const std::string& needle : needles) {
+            if (t.find(needle) != std::string::npos) {
+                total += static_cast<double>(count);
+                break;
+            }
+        }
+    }
+    return total;
+}
+
+static std::string infer_colony_role(const std::string& planet_id,
+                                     const PdxValue* planet,
+                                     const std::string& capital_id,
+                                     const std::map<std::string, size_t>& district_counts,
+                                     const std::map<std::string, size_t>& building_counts) {
+    const std::string designation = lower_copy(scalar_or(child(planet, "designation")));
+    const std::string final_designation = lower_copy(scalar_or(child(planet, "final_designation")));
+    if ((!capital_id.empty() && planet_id == capital_id) || designation == "col_capital" || final_designation == "col_capital") {
+        return "Capital";
+    }
+
+    std::map<std::string, double> score;
+    auto add = [&](const std::string& role, double value) {
+        if (value > 0.0) score[role] += value;
+    };
+
+    const PdxValue* production = child(planet, "produces");
+    add("Forge", sum_resource_like(production, {"alloys"}));
+    add("Factory", sum_resource_like(production, {"consumer_goods"}));
+    add("Mining", sum_resource_like(production, {"minerals"}));
+    add("Generator", sum_resource_like(production, {"energy"}));
+    add("Research", sum_resource_like(production, {"physics_research", "society_research", "engineering_research", "research"}));
+    add("Unity", sum_resource_like(production, {"unity"}));
+    add("Trade", sum_resource_like(production, {"trade"}));
+
+    add("Forge", count_type_matches(district_counts, {"foundry", "alloy"}) + count_type_matches(building_counts, {"foundry", "alloy"}));
+    add("Factory", count_type_matches(district_counts, {"factory", "consumer"}) + count_type_matches(building_counts, {"factory", "consumer"}));
+    add("Mining", count_type_matches(district_counts, {"mining", "mine"}) + count_type_matches(building_counts, {"mining", "mine", "mineral"}));
+    add("Generator", count_type_matches(district_counts, {"generator", "energy"}) + count_type_matches(building_counts, {"generator", "energy"}));
+    add("Research", count_type_matches(district_counts, {"research"}) + count_type_matches(building_counts, {"research", "laborator"}));
+    add("Unity", count_type_matches(district_counts, {"unity"}) + count_type_matches(building_counts, {"unity", "temple", "monument"}));
+    add("Trade", count_type_matches(district_counts, {"trade", "commercial"}) + count_type_matches(building_counts, {"trade", "commercial"}));
+
+    std::string best = "Mixed";
+    double best_score = 0.0;
+    bool tied = false;
+    for (const auto& [role, value] : score) {
+        if (value > best_score) {
+            best = role;
+            best_score = value;
+            tied = false;
+        } else if (value == best_score && value > 0.0) {
+            tied = true;
+        }
+    }
+    return (best_score > 0.0 && !tied) ? best : "Mixed";
+}
+
+static void write_count_object(JsonWriter& j, const std::map<std::string, size_t>& counts) {
+    j.begin_object();
+    for (const auto& [type, count] : counts) {
+        j.key(type);
+        j.raw_number(std::to_string(count));
+    }
+    j.end_object();
+}
+
+static void write_species_counts(JsonWriter& j, const std::map<std::string, double>& counts) {
+    j.begin_object();
+    for (const auto& [id, count] : counts) {
+        j.key(id);
+        j.raw_number(json_number(count));
+    }
+    j.end_object();
+}
+
+static void write_colony_derived_summary(JsonWriter& j,
+                                         const std::string& planet_id,
+                                         const PdxValue* planet,
+                                         const SaveIndexes& ix,
+                                         const std::string& capital_id) {
+    std::string planet_name = localized_name(child(planet, "name"));
+    std::string system_id = scalar_or(child(child(planet, "coordinate"), "origin"));
+    std::string system_name;
+    auto sys_it = ix.galactic_objects.find(system_id);
+    if (sys_it != ix.galactic_objects.end()) system_name = localized_name(child(sys_it->second, "name"));
+
+    std::map<std::string, size_t> district_counts;
+    std::map<std::string, size_t> building_counts;
+    std::map<std::string, size_t> deposit_counts;
+    add_type_counts(district_counts, scalar_id_list_from_child(planet, "districts"), ix.districts);
+    add_type_counts(building_counts, scalar_id_list_from_child(planet, "buildings_cache"), ix.buildings);
+    add_type_counts(deposit_counts, scalar_id_list_from_child(planet, "deposits"), ix.deposits);
+
+    std::map<std::string, double> species_counts;
+    if (const PdxValue* species_info = child(planet, "species_information")) {
+        for (const auto& e : species_info->entries) {
+            if (e.key.empty()) continue;
+            if (auto d = scalar_double(e.value)) species_counts[e.key] += *d;
+        }
+    }
+    if (species_counts.empty()) {
+        for (const std::string& pgid : scalar_id_list_from_child(planet, "pop_groups")) {
+            auto it = ix.pop_groups.find(pgid);
+            if (it == ix.pop_groups.end()) continue;
+            std::string sid = scalar_or(child(child(it->second, "key"), "species"));
+            auto size = scalar_double(child(it->second, "size"));
+            if (!sid.empty() && size) species_counts[sid] += *size;
+        }
+    }
+
+    std::string dominant_species_id;
+    double dominant_species_count = -1.0;
+    for (const auto& [sid, count] : species_counts) {
+        if (count > dominant_species_count) {
+            dominant_species_id = sid;
+            dominant_species_count = count;
+        }
+    }
+    std::string dominant_species_name;
+    auto sp_it = ix.species.find(dominant_species_id);
+    if (sp_it != ix.species.end()) dominant_species_name = localized_name(child(sp_it->second, "name"));
+
+    const std::string role = infer_colony_role(planet_id, planet, capital_id, district_counts, building_counts);
+    const std::string planet_class = scalar_or(child(planet, "planet_class"));
+    const std::string planet_size = scalar_or(child(planet, "planet_size"));
+    const std::string designation = scalar_or(child(planet, "final_designation"), scalar_or(child(planet, "designation")));
+
+    j.key("derived_summary");
+    j.begin_object();
+    j.key("planet_id"); j.value(planet_id);
+    if (!planet_name.empty()) { j.key("planet_name"); j.value(planet_name); }
+    if (!system_id.empty()) { j.key("system_id"); j.value(system_id); }
+    if (!system_name.empty()) { j.key("system_name"); j.value(system_name); }
+    write_optional_child(j, planet, "planet_class", "planet_class");
+    write_optional_child(j, planet, "planet_size", "planet_size");
+    write_optional_child(j, planet, "designation", "designation");
+    write_optional_child(j, planet, "final_designation", "final_designation");
+    write_optional_child(j, planet, "owner", "owner");
+    write_optional_child(j, planet, "controller", "controller");
+    for (const std::string& k : {"stability", "crime", "amenities", "amenities_usage", "free_amenities", "total_housing", "housing_usage", "free_housing", "num_sapient_pops", "employable_pops"}) {
+        write_optional_child(j, planet, k, k);
+    }
+    write_optional_child(j, planet, "produces", "production");
+    write_optional_child(j, planet, "upkeep", "upkeep");
+    write_optional_child(j, planet, "profits", "profit");
+    j.key("district_counts_by_type"); write_count_object(j, district_counts);
+    j.key("building_counts_by_type"); write_count_object(j, building_counts);
+    j.key("deposit_counts_by_type"); write_count_object(j, deposit_counts);
+    j.key("species_counts_by_id"); write_species_counts(j, species_counts);
+    if (!dominant_species_id.empty()) { j.key("dominant_species_id"); j.value(dominant_species_id); }
+    if (!dominant_species_name.empty()) { j.key("dominant_species_name"); j.value(dominant_species_name); }
+    j.key("species_count"); j.raw_number(std::to_string(species_counts.size()));
+    j.key("warning_count"); j.raw_number("0");
+
+    j.key("presentation_card");
+    j.begin_object();
+    j.key("title"); j.value(!planet_name.empty() ? planet_name : planet_id);
+    std::vector<std::string> subtitle_parts;
+    if (!designation.empty()) subtitle_parts.push_back(display_token(designation));
+    if (!planet_class.empty()) subtitle_parts.push_back(display_token(planet_class));
+    if (!planet_size.empty()) subtitle_parts.push_back("Size " + planet_size);
+    std::string subtitle;
+    for (size_t i = 0; i < subtitle_parts.size(); ++i) {
+        if (i) subtitle += " | ";
+        subtitle += subtitle_parts[i];
+    }
+    j.key("subtitle"); j.value(subtitle);
+    j.key("system"); j.value(system_name);
+    j.key("role"); j.value(role);
+    j.key("primary_metric_label"); j.value("Pops");
+    j.key("primary_metric_value");
+    if (const PdxValue* pops = child(planet, "num_sapient_pops")) write_pdx_as_json(j, pops);
+    else j.value(nullptr);
+    j.key("secondary_metrics");
+    j.begin_object();
+    write_metric_or_null(j, planet, "stability");
+    write_metric_or_null(j, planet, "crime");
+    write_metric_or_null(j, planet, "free_housing");
+    write_metric_or_null(j, planet, "free_amenities");
+    j.end_object();
+    j.end_object();
+
+    j.end_object();
+}
+
+static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
     j.begin_object();
     j.key("planet_id"); j.value(planet_id);
     j.key("name"); j.value(localized_name(child(planet, "name")));
@@ -1395,6 +1667,8 @@ static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxV
     if (const PdxValue* mods = child(planet, "planet_modifier")) { j.key("planet_modifiers"); write_pdx_as_json(j, mods); }
     if (const PdxValue* flags = child(planet, "flags")) { j.key("flags"); write_pdx_as_json(j, flags); }
 
+    write_colony_derived_summary(j, planet_id, planet, ix, capital_id);
+
     if (st.include_source_locations) { j.key("source"); write_source(j, planet); }
     if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, planet); }
     j.end_object();
@@ -1557,7 +1831,7 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
         summary.capital_name = localized_name(child(capital_it->second, "name"));
-        write_planet(j, capital_id, capital_it->second, ix, st, defs, referenced_species, referenced_leaders);
+        write_planet(j, capital_id, capital_it->second, ix, st, defs, capital_id, referenced_species, referenced_leaders);
     } else {
         if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
         j.value(nullptr);
@@ -1567,13 +1841,15 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.begin_array();
     const std::vector<std::string> owned_planets = scalar_id_list_from_child(country, "owned_planets");
     summary.owned_planets = owned_planets.size();
+    std::vector<std::string> colonies_missing_derived_summary;
     for (const std::string& pid : owned_planets) {
         auto it = ix.planets.find(pid);
         if (it != ix.planets.end()) {
-            write_planet(j, pid, it->second, ix, st, defs, referenced_species, referenced_leaders);
+            write_planet(j, pid, it->second, ix, st, defs, capital_id, referenced_species, referenced_leaders);
             summary.exported_colonies++;
         } else {
             add_unresolved("planet", pid, "country.owned_planets");
+            colonies_missing_derived_summary.push_back(pid);
             j.begin_object(); j.key("planet_id"); j.value(pid); j.key("resolved"); j.value(false); j.end_object();
         }
     }
@@ -1679,6 +1955,10 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.key("warning_count"); j.raw_number(std::to_string(unresolved_refs.size()));
     j.key("colonies_missing_systems"); j.begin_array(); j.end_array();
     j.key("colonies_with_owner_mismatch"); j.begin_array(); j.end_array();
+    j.key("colonies_missing_derived_summary");
+    j.begin_array();
+    for (const std::string& pid : colonies_missing_derived_summary) j.value(pid);
+    j.end_array();
     j.end_object();
 
     j.key("references");
