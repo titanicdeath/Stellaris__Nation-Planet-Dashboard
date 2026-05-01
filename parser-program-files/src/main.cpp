@@ -1178,6 +1178,223 @@ static void write_system_summary(JsonWriter& j, const std::string& id, const Pdx
     j.end_object();
 }
 
+static std::string planet_system_id(const PdxValue* planet) {
+    return scalar_or(child(child(planet, "coordinate"), "origin"));
+}
+
+static void write_string_array(JsonWriter& j, const std::set<std::string>& values) {
+    j.begin_array();
+    for (const std::string& value : values) j.value(value);
+    j.end_array();
+}
+
+static std::vector<std::string> system_planet_ids(const PdxValue* sys) {
+    std::vector<std::string> out;
+    for (const PdxValue* pv : children(sys, "planet")) {
+        std::string id = scalar_or(pv);
+        if (!id.empty()) out.push_back(id);
+    }
+    return out;
+}
+
+static std::set<std::string> system_starbase_ids(const PdxValue* sys) {
+    std::set<std::string> out;
+    for (const std::string& id : primitive_list(child(sys, "starbases"))) {
+        if (!id.empty()) out.insert(id);
+    }
+    for (const PdxValue* sb : children(sys, "starbase")) {
+        std::string id = scalar_or(sb);
+        if (!id.empty()) out.insert(id);
+    }
+    return out;
+}
+
+static std::vector<std::string> system_hyperlane_targets(const PdxValue* sys) {
+    std::vector<std::string> out;
+    const PdxValue* hyperlanes = child(sys, "hyperlane");
+    if (!hyperlanes || hyperlanes->kind != PdxValue::Kind::Container) return out;
+    for (const auto& e : hyperlanes->entries) {
+        if (e.value && e.value->kind == PdxValue::Kind::Container) {
+            std::string to = scalar_or(child(e.value, "to"));
+            if (!to.empty()) out.push_back(to);
+        }
+    }
+    return out;
+}
+
+static bool system_has_dashboard_coordinate(const PdxValue* sys) {
+    const PdxValue* coord = child(sys, "coordinate");
+    return coord && child(coord, "x") && child(coord, "y");
+}
+
+struct MapSystemContext {
+    std::set<std::string> colony_planet_ids;
+    std::set<std::string> owned_planet_ids;
+    std::set<std::string> controlled_planet_ids;
+    std::set<std::string> starbase_ids;
+    bool is_colony_system = false;
+    bool has_capital = false;
+    std::string capital_planet_id;
+};
+
+struct MapExportContext {
+    std::map<std::string, MapSystemContext> systems;
+    std::string capital_system_id;
+    std::string capital_system_name;
+    size_t hyperlane_edge_count = 0;
+    std::set<std::string> systems_missing_coordinates;
+    std::set<std::string> colonies_missing_systems;
+    std::set<std::string> colonies_with_unexported_systems;
+    std::set<std::string> hyperlane_targets_missing_from_export;
+};
+
+static MapExportContext build_map_export_context(const std::vector<std::string>& owned_planets,
+                                                 const std::vector<std::string>& controlled_planets,
+                                                 const std::vector<std::string>& owned_fleets,
+                                                 const std::string& capital_id,
+                                                 const SaveIndexes& ix) {
+    MapExportContext ctx;
+
+    auto include_system = [&](const std::string& system_id) -> MapSystemContext* {
+        if (system_id.empty()) return nullptr;
+        auto sys_it = ix.galactic_objects.find(system_id);
+        if (sys_it == ix.galactic_objects.end()) return nullptr;
+        auto [it, inserted] = ctx.systems.emplace(system_id, MapSystemContext{});
+        (void)inserted;
+        for (const std::string& sbid : system_starbase_ids(sys_it->second)) it->second.starbase_ids.insert(sbid);
+        return &it->second;
+    };
+
+    for (const std::string& pid : owned_planets) {
+        auto pit = ix.planets.find(pid);
+        if (pit == ix.planets.end()) {
+            ctx.colonies_missing_systems.insert(pid);
+            continue;
+        }
+        const std::string system_id = planet_system_id(pit->second);
+        MapSystemContext* sys = include_system(system_id);
+        if (!sys) {
+            ctx.colonies_missing_systems.insert(pid);
+            continue;
+        }
+        sys->is_colony_system = true;
+        sys->colony_planet_ids.insert(pid);
+        sys->owned_planet_ids.insert(pid);
+    }
+
+    if (!capital_id.empty()) {
+        auto pit = ix.planets.find(capital_id);
+        if (pit != ix.planets.end()) {
+            const std::string system_id = planet_system_id(pit->second);
+            if (MapSystemContext* sys = include_system(system_id)) {
+                sys->has_capital = true;
+                sys->capital_planet_id = capital_id;
+                ctx.capital_system_id = system_id;
+                auto sys_it = ix.galactic_objects.find(system_id);
+                if (sys_it != ix.galactic_objects.end()) ctx.capital_system_name = localized_name(child(sys_it->second, "name"));
+            }
+        }
+    }
+
+    for (const std::string& pid : controlled_planets) {
+        auto pit = ix.planets.find(pid);
+        if (pit == ix.planets.end()) continue;
+        if (MapSystemContext* sys = include_system(planet_system_id(pit->second))) {
+            sys->controlled_planet_ids.insert(pid);
+        }
+    }
+
+    for (const std::string& fid : owned_fleets) {
+        auto fit = ix.fleets.find(fid);
+        if (fit == ix.fleets.end()) continue;
+        include_system(scalar_or(child(child(fit->second, "coordinate"), "origin")));
+    }
+
+    for (const std::string& pid : owned_planets) {
+        auto pit = ix.planets.find(pid);
+        if (pit == ix.planets.end()) continue;
+        const std::string system_id = planet_system_id(pit->second);
+        if (!system_id.empty() && ix.galactic_objects.find(system_id) != ix.galactic_objects.end() && ctx.systems.find(system_id) == ctx.systems.end()) {
+            ctx.colonies_with_unexported_systems.insert(pid);
+        }
+    }
+
+    for (const auto& [system_id, _] : ctx.systems) {
+        auto sys_it = ix.galactic_objects.find(system_id);
+        if (sys_it == ix.galactic_objects.end()) continue;
+        if (!system_has_dashboard_coordinate(sys_it->second)) ctx.systems_missing_coordinates.insert(system_id);
+        for (const std::string& target : system_hyperlane_targets(sys_it->second)) {
+            ctx.hyperlane_edge_count++;
+            if (ctx.systems.find(target) == ctx.systems.end()) ctx.hyperlane_targets_missing_from_export.insert(target);
+        }
+    }
+
+    return ctx;
+}
+
+static void write_system_context(JsonWriter& j,
+                                 const std::string& system_id,
+                                 const PdxValue* sys,
+                                 const MapSystemContext& ctx,
+                                 const Settings& st) {
+    j.begin_object();
+    j.key("system_id"); j.value(system_id);
+    j.key("name"); j.value(localized_name(child(sys, "name")));
+    if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
+    json_optional_scalar(j, sys, "star_class");
+    json_optional_scalar(j, sys, "type");
+    json_optional_scalar(j, sys, "sector");
+    j.key("planet_ids");
+    j.begin_array();
+    for (const std::string& pid : system_planet_ids(sys)) j.value(pid);
+    j.end_array();
+    j.key("colony_planet_ids"); write_string_array(j, ctx.colony_planet_ids);
+    j.key("owned_planet_ids"); write_string_array(j, ctx.owned_planet_ids);
+    j.key("controlled_planet_ids"); write_string_array(j, ctx.controlled_planet_ids);
+    j.key("starbase_ids"); write_string_array(j, ctx.starbase_ids);
+    j.key("hyperlanes");
+    if (const PdxValue* h = child(sys, "hyperlane")) write_pdx_as_json(j, h);
+    else { j.begin_array(); j.end_array(); }
+    j.key("is_colony_system"); j.value(ctx.is_colony_system);
+    j.key("has_capital"); j.value(ctx.has_capital);
+    if (ctx.has_capital) { j.key("capital_planet_id"); j.value(ctx.capital_planet_id); }
+    if (st.include_source_locations) { j.key("source"); write_source(j, sys); }
+    j.end_object();
+}
+
+static void write_systems_block(JsonWriter& j, const MapExportContext& map_ctx, const SaveIndexes& ix, const Settings& st) {
+    j.key("systems");
+    j.begin_object();
+    for (const auto& [system_id, ctx] : map_ctx.systems) {
+        auto sys_it = ix.galactic_objects.find(system_id);
+        if (sys_it == ix.galactic_objects.end()) continue;
+        j.key(system_id);
+        write_system_context(j, system_id, sys_it->second, ctx, st);
+    }
+    j.end_object();
+}
+
+static size_t colony_system_count(const MapExportContext& map_ctx) {
+    size_t count = 0;
+    for (const auto& [_, ctx] : map_ctx.systems) {
+        if (ctx.is_colony_system) count++;
+    }
+    return count;
+}
+
+static void write_map_summary(JsonWriter& j, const MapExportContext& map_ctx) {
+    j.key("map_summary");
+    j.begin_object();
+    j.key("system_count"); j.raw_number(std::to_string(map_ctx.systems.size()));
+    j.key("colony_system_count"); j.raw_number(std::to_string(colony_system_count(map_ctx)));
+    j.key("capital_system_id"); j.value(map_ctx.capital_system_id);
+    j.key("capital_system_name"); j.value(map_ctx.capital_system_name);
+    j.key("hyperlane_edge_count"); j.raw_number(std::to_string(map_ctx.hyperlane_edge_count));
+    j.key("systems_missing_coordinates"); write_string_array(j, map_ctx.systems_missing_coordinates);
+    j.key("colonies_missing_systems"); write_string_array(j, map_ctx.colonies_missing_systems);
+    j.end_object();
+}
+
 static std::optional<double> scalar_double(const PdxValue* v) {
     auto s = scalar(v);
     if (!s) return std::nullopt;
@@ -1674,6 +1891,11 @@ static void write_colony_derived_summary(JsonWriter& j,
     if (!planet_name.empty()) { j.key("planet_name"); j.value(planet_name); }
     if (!system_id.empty()) { j.key("system_id"); j.value(system_id); }
     if (!system_name.empty()) { j.key("system_name"); j.value(system_name); }
+    j.key("map");
+    j.begin_object();
+    j.key("system_id"); j.value(system_id);
+    j.key("system_name"); j.value(system_name);
+    j.end_object();
     write_optional_child(j, planet, "planet_class", "planet_class");
     write_optional_child(j, planet, "planet_size", "planet_size");
     write_optional_child(j, planet, "designation", "designation");
@@ -2077,8 +2299,13 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     if (!ruler.empty() && ruler != "4294967295") referenced_leaders.insert(ruler);
 
     const std::vector<std::string> owned_planets = scalar_id_list_from_child(country, "owned_planets");
+    const std::vector<std::string> controlled_planets = scalar_id_list_from_child(country, "controlled_planets");
+    const std::vector<std::string> owned_fleet_ids = country_owned_fleet_ids(country);
+    std::string capital_id = scalar_or(child(country, "capital"));
+    summary.capital_id = capital_id;
     EmpireRollups rollups = build_empire_rollups(owned_planets, ix);
     for (const auto& [sid, _] : rollups.demographics.species) referenced_species.insert(sid);
+    MapExportContext map_context = build_map_export_context(owned_planets, controlled_planets, owned_fleet_ids, capital_id, ix);
 
     j.begin_object();
     j.key("schema_version"); j.value("dashboard-country-v0.1");
@@ -2119,8 +2346,6 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
         unresolved_refs.push_back(UnresolvedReference{kind, id, ctx});
     };
 
-    std::string capital_id = scalar_or(child(country, "capital"));
-    summary.capital_id = capital_id;
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
         summary.capital_name = localized_name(child(capital_it->second, "name"));
@@ -2158,15 +2383,17 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
 
     j.key("controlled_planet_ids");
     j.begin_array();
-    for (const std::string& pid : scalar_id_list_from_child(country, "controlled_planets")) j.value(pid);
+    for (const std::string& pid : controlled_planets) j.value(pid);
     j.end_array();
 
     write_demographics(j, rollups.demographics);
     write_workforce_summary(j, rollups.workforce);
+    write_systems_block(j, map_context, ix, st);
+    write_map_summary(j, map_context);
 
     j.key("fleets");
     j.begin_array();
-    for (const std::string& fid : country_owned_fleet_ids(country)) {
+    for (const std::string& fid : owned_fleet_ids) {
         auto it = ix.fleets.find(fid);
         if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders);
         else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); j.value(fid); j.key("resolved"); j.value(false); j.end_object(); }
@@ -2241,8 +2468,16 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.key("military");
     j.begin_object();
     for (const std::string& k : {"military_power", "fleet_size", "used_naval_capacity"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
-    j.key("fleet_count"); j.raw_number(std::to_string(country_owned_fleet_ids(country).size()));
+    j.key("fleet_count"); j.raw_number(std::to_string(owned_fleet_ids.size()));
     j.key("army_count"); j.raw_number(std::to_string(scalar_id_list_from_child(country, "owned_armies").size()));
+    j.end_object();
+    j.key("map");
+    j.begin_object();
+    j.key("system_count"); j.raw_number(std::to_string(map_context.systems.size()));
+    j.key("colony_system_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
+    j.key("capital_system_id"); j.value(map_context.capital_system_id);
+    j.key("capital_system_name"); j.value(map_context.capital_system_name);
+    j.key("hyperlane_edge_count"); j.raw_number(std::to_string(map_context.hyperlane_edge_count));
     j.end_object();
     j.key("validation");
     j.begin_object();
@@ -2257,6 +2492,8 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     } else {
         j.value(false);
     }
+    j.key("systems_exported_count"); j.raw_number(std::to_string(map_context.systems.size()));
+    j.key("colony_systems_exported_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
     j.end_object();
     j.end_object();
 
@@ -2266,7 +2503,12 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.key("capital_in_colonies"); j.value(capital_id.empty() || std::find(owned_planets.begin(), owned_planets.end(), capital_id) != owned_planets.end());
     j.key("unresolved_reference_count"); j.raw_number(std::to_string(unresolved_refs.size()));
     j.key("warning_count"); j.raw_number(std::to_string(unresolved_refs.size()));
-    j.key("colonies_missing_systems"); j.begin_array(); j.end_array();
+    j.key("systems_exported_count"); j.raw_number(std::to_string(map_context.systems.size()));
+    j.key("colony_systems_exported_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
+    j.key("systems_missing_coordinates"); write_string_array(j, map_context.systems_missing_coordinates);
+    j.key("colonies_missing_systems"); write_string_array(j, map_context.colonies_missing_systems);
+    j.key("colonies_with_unexported_systems"); write_string_array(j, map_context.colonies_with_unexported_systems);
+    j.key("hyperlane_targets_missing_from_export"); write_string_array(j, map_context.hyperlane_targets_missing_from_export);
     j.key("colonies_with_owner_mismatch"); j.begin_array(); j.end_array();
     j.key("colonies_missing_derived_summary");
     j.begin_array();

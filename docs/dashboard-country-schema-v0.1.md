@@ -11,6 +11,8 @@ This document describes the practical JSON contract emitted by the parser for on
 - `capital_planet`: Expanded planet object for `country.capital`, or `null`.
 - `colonies`: Expanded array of owned planets (`country.owned_planets`).
 - `controlled_planet_ids`: Raw controlled planet IDs.
+- `systems`: Selected-country relevant star system context, keyed by system ID.
+- `map_summary`: Compact map/export summary for the selected-country system subset.
 - `fleets`: Fleet summaries owned by the country.
 - `owned_armies`: Army summaries owned by the country.
 - `species`: Referenced species objects, keyed by species ID.
@@ -58,6 +60,7 @@ If a referenced planet cannot be resolved, a placeholder object with `resolved=f
 Each resolved colony object includes `derived_summary` without removing or rewriting the detailed/raw colony sections. Fields are emitted when the source save data or resolved indexes make them available:
 
 - identity/location: `planet_id`, `planet_name`, `system_id`, `system_name`
+- optional compact `map` object with `system_id` and `system_name`
 - classification: `planet_class`, `planet_size`, `designation`, `final_designation`
 - ownership/state: `owner`, `controller`, `stability`, `crime`
 - capacity: `amenities`, `amenities_usage`, `free_amenities`, `total_housing`, `housing_usage`, `free_housing`
@@ -78,6 +81,38 @@ Each resolved colony object includes `derived_summary` without removing or rewri
 - `secondary_metrics`: stable object with `stability`, `crime`, `free_housing`, and `free_amenities`, using `null` for unavailable values.
 
 Role inference is deterministic and conservative. Capital planets, including `col_capital`, are `Capital`. Otherwise the parser scores obvious production keys and district/building type tokens for forge/alloy, factory/consumer goods, mining/minerals, generator/energy, research, unity, and trade signals. A single strongest signal maps to `Forge`, `Factory`, `Mining`, `Generator`, `Research`, `Unity`, or `Trade`; ties or missing signals map to `Mixed`.
+
+## `systems` and `map_summary`
+
+`systems` is a top-level object keyed by galactic object/system ID. It is selected-country relevant context for the current country snapshot, not a full galaxy export.
+
+Current system selection is conservative:
+
+- every resolved system containing one or more owned colony planets
+- the country capital planet system when resolvable
+- systems for `controlled_planet_ids` when their planets resolve to `coordinate.origin`
+- systems for owned fleet `coordinate.origin` when present
+
+Each `systems.<system_id>` entry emits:
+
+- `system_id`, `name`, `coordinate`, `star_class`, `type`, `sector` when available
+- `planet_ids` from the galactic object
+- `colony_planet_ids`, `owned_planet_ids`, and `controlled_planet_ids` relevant to the selected country
+- `starbase_ids` from the system object when available
+- `hyperlanes` from the system object, or an empty array
+- `is_colony_system`, `has_capital`, and `capital_planet_id` when applicable
+
+`map_summary` is a compact dashboard convenience object:
+
+- `system_count`
+- `colony_system_count`
+- `capital_system_id`
+- `capital_system_name`
+- `hyperlane_edge_count`
+- `systems_missing_coordinates`
+- `colonies_missing_systems`
+
+Political borders, full-galaxy ownership boundaries, claimed systems without colonies, and complete war/diplomatic map overlays are not inferred in this milestone. Hyperlanes may point to systems outside the selected-country subset; those targets are diagnostic warnings rather than export failures.
 
 ## `species` and `leaders`
 
@@ -155,6 +190,11 @@ Current top-level validation fields include:
 - `unresolved_reference_count`
 - `warning_count`
 - `colonies_missing_systems`
+- `systems_exported_count`
+- `colony_systems_exported_count`
+- `systems_missing_coordinates`
+- `colonies_with_unexported_systems`
+- `hyperlane_targets_missing_from_export`: hyperlane target system IDs referenced by exported systems but not included in this selected-country subset.
 - `colonies_with_owner_mismatch`
 - `colonies_missing_derived_summary`: colony IDs that did not receive `colonies[].derived_summary`; normally empty for resolved colonies.
 - `demographics_species_count`
@@ -185,3 +225,11 @@ Current top-level validation fields include:
 - Added compact colony rollups inside `colonies[].derived_summary`: `pop_category_counts`, `job_counts_by_type`, `workforce_by_job_type`, and `species_counts_by_name`.
 - Added validation fields for demographics totals, missing colony demographic summaries, and unresolved census species.
 - Documented current limits around legal status, slavery rights, and exact stratum inference.
+
+## New in Milestone 3B-3
+
+- Added top-level `systems` keyed by selected-country relevant system ID.
+- Added top-level `map_summary` and compact `derived_summary.map` rollup.
+- Linked colony `derived_summary.system_id`/`system_name` to the top-level system subset without duplicating full system objects inside colonies.
+- Added validation fields for exported system counts, missing coordinates, missing colony systems, colonies whose resolved systems were not exported, and hyperlane targets outside the selected subset.
+- Documented current limits around full galaxy export, political borders, and hyperlane target coverage.

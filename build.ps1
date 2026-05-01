@@ -26,25 +26,58 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
-function Invoke-Native {
+function Format-Duration {
+    param([TimeSpan]$Duration)
+
+    if ($Duration.TotalHours -ge 1) {
+        return "{0:hh\:mm\:ss\.fff}" -f $Duration
+    }
+
+    return "{0:mm\:ss\.fff}" -f $Duration
+}
+
+function Invoke-NativeTimed {
     param(
         [string]$Label,
         [string]$File,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [ref]$ElapsedOut
     )
 
     Write-Host "`n== $Label ==" -ForegroundColor Cyan
-    & $File @Arguments
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE"
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    & $File @Arguments
+    $exitCode = $LASTEXITCODE
+    $timer.Stop()
+
+    if ($null -ne $ElapsedOut) {
+        $ElapsedOut.Value = $timer.Elapsed
+    }
+
+    Write-Host "Completed $Label in $(Format-Duration $timer.Elapsed)" -ForegroundColor DarkGray
+
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode after $(Format-Duration $timer.Elapsed)"
     }
 }
 
 function Get-FirstCommandPath {
     param([string]$CommandName)
 
-    $result = cmd /c "where $CommandName" 2>$null
+    $cmd = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if ($null -ne $cmd) {
+        return $cmd.Source
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $result = cmd /d /c "where $CommandName 2>NUL"
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
     if ($LASTEXITCODE -ne 0 -or $null -eq $result) {
         return ""
     }
@@ -218,11 +251,16 @@ function Test-GeneratedJson {
             "derived_summary",
             "validation",
             "demographics",
-            "workforce_summary"
+            "workforce_summary",
+            "systems"
         )) {
             if (-not (Has-JsonProperty $json $requiredTopLevel)) {
                 throw "$($file.FullName) is missing top-level field: $requiredTopLevel"
             }
+        }
+
+        if (-not (Has-JsonProperty $json "map_summary") -and -not (Has-JsonProperty $json.derived_summary "map")) {
+            throw "$($file.FullName) is missing map_summary or derived_summary.map"
         }
 
         $colonies = @($json.colonies)
@@ -246,6 +284,12 @@ function Test-GeneratedJson {
                 throw "$($file.FullName) colony $planetId is missing derived_summary.presentation_card"
             }
 
+            if ((Has-JsonProperty $colony.derived_summary "system_id") -and
+                (-not [string]::IsNullOrWhiteSpace([string]$colony.derived_summary.system_id)) -and
+                (-not ($json.systems.PSObject.Properties.Name -contains ([string]$colony.derived_summary.system_id)))) {
+                throw "$($file.FullName) colony $planetId has derived_summary.system_id $($colony.derived_summary.system_id), but that system is absent from top-level systems"
+            }
+
             foreach ($requiredColonySummary in @(
                 "species_counts_by_id",
                 "pop_category_counts",
@@ -265,10 +309,20 @@ function Test-GeneratedJson {
             "demographics_species_count",
             "demographics_total_pops",
             "demographics_matches_country_pop_count",
-            "colonies_missing_demographic_summary"
+            "colonies_missing_demographic_summary",
+            "systems_exported_count",
+            "colonies_with_unexported_systems"
         )) {
             if (-not (Has-JsonProperty $json.validation $requiredValidationField)) {
                 throw "$($file.FullName) is missing validation.$requiredValidationField"
+            }
+        }
+
+        if ((Has-JsonProperty $json.validation "hyperlane_targets_missing_from_export")) {
+            foreach ($target in @($json.validation.hyperlane_targets_missing_from_export)) {
+                if ($null -ne $target -and $target -is [System.Management.Automation.PSCustomObject]) {
+                    throw "$($file.FullName) validation.hyperlane_targets_missing_from_export contains a malformed target entry"
+                }
             }
         }
 
@@ -320,6 +374,8 @@ function Test-GeneratedJson {
 
     Write-Host "`nAll JSON validation checks passed." -ForegroundColor Green
 }
+
+$scriptTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Auto-enable vcpkg when the repository has a vcpkg manifest.
 $UseVcpkgEffective = $UseVcpkg.IsPresent
@@ -381,16 +437,44 @@ Set VCPKG_ROOT or pass it explicitly:
     )
 }
 
-Invoke-Native "Configure CMake" "cmake" $configureArgs
-Invoke-Native "Build parser" "cmake" @("--build", "build", "--config", "Release")
+$configureTime = [TimeSpan]::Zero
+$buildTime = [TimeSpan]::Zero
+$selfTestTime = [TimeSpan]::Zero
+$parseTime = [TimeSpan]::Zero
+$jsonValidationTime = [TimeSpan]::Zero
+
+Invoke-NativeTimed -Label "Configure CMake" -File "cmake" -Arguments $configureArgs -ElapsedOut ([ref]$configureTime)
+Invoke-NativeTimed -Label "Build parser" -File "cmake" -Arguments @("--build", "build", "--config", "Release") -ElapsedOut ([ref]$buildTime)
 
 if ($Test) {
     $ParserExe = Get-ParserExe
 
-    Invoke-Native "Parser self-test" $ParserExe @("--self-test")
-    Invoke-Native "Parse real saves" $ParserExe @()
+    Invoke-NativeTimed -Label "Parser self-test" -File $ParserExe -Arguments @("--self-test") -ElapsedOut ([ref]$selfTestTime)
 
+    # This is the main parser runtime measurement.
+    Invoke-NativeTimed -Label "Parse real saves" -File $ParserExe -Arguments @() -ElapsedOut ([ref]$parseTime)
+
+    Write-Host "`n== JSON/schema validation ==" -ForegroundColor Cyan
+    $validationTimer = [System.Diagnostics.Stopwatch]::StartNew()
     Test-GeneratedJson
+    $validationTimer.Stop()
+    $jsonValidationTime = $validationTimer.Elapsed
+
+    Write-Host "Completed JSON/schema validation in $(Format-Duration $jsonValidationTime)" -ForegroundColor DarkGray
 }
+
+$scriptTimer.Stop()
+
+Write-Host "`n== Timing Summary ==" -ForegroundColor Cyan
+Write-Host ("Configure CMake:        {0}" -f (Format-Duration $configureTime))
+Write-Host ("Build parser:           {0}" -f (Format-Duration $buildTime))
+
+if ($Test) {
+    Write-Host ("Parser self-test:       {0}" -f (Format-Duration $selfTestTime))
+    Write-Host ("Parse real saves:       {0}" -f (Format-Duration $parseTime)) -ForegroundColor Green
+    Write-Host ("JSON/schema validation: {0}" -f (Format-Duration $jsonValidationTime))
+}
+
+Write-Host ("Total script time:      {0}" -f (Format-Duration $scriptTimer.Elapsed))
 
 Write-Host "`nBuild script completed successfully." -ForegroundColor Green
