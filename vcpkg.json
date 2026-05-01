@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "stellaris-nation-planet-dashboard-parser",
+  "version-string": "0.1.1",
+  "dependencies": [
+    "zlib"
+  ]
+}

@@ -1,0 +1,13 @@
+build/
+output/
+save_files/
+*.sav
+*.gamestate
+*.pdb
+*.ilk
+*.dll
+*.exe
+*.obj
+*.lib
+*.log
+settings.config
