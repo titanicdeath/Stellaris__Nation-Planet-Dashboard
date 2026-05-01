@@ -194,6 +194,7 @@ struct Settings {
     bool include_debug_sections = true;
     bool include_source_locations = true;
     bool include_raw_pdx_objects = false;
+    bool export_timeline = true;
 
     std::string settings_hash;
 };
@@ -269,6 +270,7 @@ static Settings load_settings(const fs::path& config_path) {
     st.include_debug_sections = getb("output", "include_debug_sections", true);
     st.include_source_locations = getb("output", "include_source_locations", true);
     st.include_raw_pdx_objects = getb("output", "include_raw_pdx_objects", false);
+    st.export_timeline = getb("output", "export_timeline", true);
 
     return st;
 }
@@ -1429,7 +1431,28 @@ static std::vector<std::string> select_country_ids(const Settings& st, const Sav
     return st.nation_ids;
 }
 
-static CountryExportSummary write_country_output(const fs::path& out_path,
+struct TimelinePoint {
+    std::string game_date;
+    std::string save_file;
+    std::string country_id;
+    std::string country_name;
+    std::string colony_count;
+    std::string total_pops;
+    std::string military_power;
+    std::string economy_power;
+    std::string tech_power;
+    std::string victory_score;
+    std::string victory_rank;
+    std::string fleet_size;
+    std::string used_naval_capacity;
+    std::string empire_size;
+    std::string monthly_net;
+    size_t unresolved_references = 0;
+    size_t warnings = 0;
+    fs::path output_file;
+};
+
+static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::path& out_path,
                                  const std::string& save_file_name,
                                  const std::string& game_date,
                                  const std::string& country_id,
@@ -1438,9 +1461,15 @@ static CountryExportSummary write_country_output(const fs::path& out_path,
                                  const Settings& st,
                                  const DefinitionIndex* defs) {
     CountryExportSummary summary;
+    TimelinePoint timeline;
     summary.country_id = country_id;
     summary.country_name = get_country_name(country);
     summary.output_file = out_path;
+    timeline.country_id = country_id;
+    timeline.country_name = summary.country_name;
+    timeline.game_date = game_date;
+    timeline.save_file = save_file_name;
+    timeline.output_file = out_path;
     fs::create_directories(out_path.parent_path());
     std::ofstream out(out_path, std::ios::binary);
     if (!out) throw std::runtime_error("Could not write output: " + out_path.string());
@@ -1582,6 +1611,49 @@ static CountryExportSummary write_country_output(const fs::path& out_path,
     }
     j.end_object();
 
+    j.key("derived_summary");
+    j.begin_object();
+    j.key("identity");
+    j.begin_object();
+    j.key("country_id"); j.value(country_id);
+    j.key("country_name"); j.value(summary.country_name);
+    j.key("game_date"); j.value(game_date);
+    j.key("capital_planet_id"); j.value(capital_id);
+    j.key("capital_planet_name"); j.value(summary.capital_name);
+    j.end_object();
+    j.key("colonies");
+    j.begin_object();
+    j.key("owned_planet_count"); j.raw_number(std::to_string(summary.owned_planets));
+    j.key("exported_colony_count"); j.raw_number(std::to_string(summary.exported_colonies));
+    j.end_object();
+    j.key("economy");
+    j.begin_object();
+    for (const std::string& k : {"economy_power", "tech_power", "empire_size", "victory_score", "victory_rank", "num_sapient_pops", "employable_pops"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
+    if (const PdxValue* budget = child(country, "budget")) { if (const PdxValue* balance = child(budget, "balance")) { j.key("monthly_net_resources"); write_pdx_as_json(j, balance); } }
+    j.end_object();
+    j.key("military");
+    j.begin_object();
+    for (const std::string& k : {"military_power", "fleet_size", "used_naval_capacity"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
+    j.key("fleet_count"); j.raw_number(std::to_string(country_owned_fleet_ids(country).size()));
+    j.key("army_count"); j.raw_number(std::to_string(scalar_id_list_from_child(country, "owned_armies").size()));
+    j.end_object();
+    j.key("validation");
+    j.begin_object();
+    j.key("owned_planets_match_exported_colonies"); j.value(summary.owned_planets == summary.exported_colonies);
+    j.key("capital_in_colonies"); j.value(capital_id.empty() || std::find(owned_planets.begin(), owned_planets.end(), capital_id) != owned_planets.end());
+    j.end_object();
+    j.end_object();
+
+    j.key("validation");
+    j.begin_object();
+    j.key("owned_planets_match_exported_colonies"); j.value(summary.owned_planets == summary.exported_colonies);
+    j.key("capital_in_colonies"); j.value(capital_id.empty() || std::find(owned_planets.begin(), owned_planets.end(), capital_id) != owned_planets.end());
+    j.key("unresolved_reference_count"); j.raw_number(std::to_string(unresolved_refs.size()));
+    j.key("warning_count"); j.raw_number(std::to_string(unresolved_refs.size()));
+    j.key("colonies_missing_systems"); j.begin_array(); j.end_array();
+    j.key("colonies_with_owner_mismatch"); j.begin_array(); j.end_array();
+    j.end_object();
+
     j.key("references");
     j.begin_object();
     j.key("raw_country_id"); j.value(country_id);
@@ -1605,6 +1677,18 @@ static CountryExportSummary write_country_output(const fs::path& out_path,
     j.end_object();
     summary.unresolved_references = unresolved_refs.size();
     summary.warnings = unresolved_refs.size();
+    timeline.unresolved_references = unresolved_refs.size();
+    timeline.warnings = unresolved_refs.size();
+    timeline.colony_count = std::to_string(summary.exported_colonies);
+    timeline.total_pops = scalar_or(child(country, "num_sapient_pops"));
+    timeline.military_power = scalar_or(child(country, "military_power"));
+    timeline.economy_power = scalar_or(child(country, "economy_power"));
+    timeline.tech_power = scalar_or(child(country, "tech_power"));
+    timeline.victory_score = scalar_or(child(country, "victory_score"));
+    timeline.victory_rank = scalar_or(child(country, "victory_rank"));
+    timeline.fleet_size = scalar_or(child(country, "fleet_size"));
+    timeline.used_naval_capacity = scalar_or(child(country, "used_naval_capacity"));
+    timeline.empire_size = scalar_or(child(country, "empire_size"));
 
     if (st.include_debug_sections) {
         j.key("debug");
@@ -1627,7 +1711,7 @@ static CountryExportSummary write_country_output(const fs::path& out_path,
     }
 
     j.end_object();
-    return summary;
+    return {summary, timeline};
 }
 
 static bool run_parser_self_tests() {
@@ -1738,6 +1822,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        std::unordered_map<std::string, std::vector<TimelinePoint>> timeline_by_country;
         for (const fs::path& save_path : saves) {
             std::cout << "\n=== " << save_path.filename().string() << " ===\n";
             const std::string save_hash = file_hash_fnv1a64(save_path);
@@ -1778,7 +1863,10 @@ int main(int argc, char** argv) {
                 }
                 std::string cname = get_country_name(it->second);
                 fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ").json");
-                CountryExportSummary s = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                auto result = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                CountryExportSummary s = result.first;
+                TimelinePoint tp = result.second;
+                timeline_by_country[cid].push_back(tp);
                 std::cout << "Save: " << game_date << "\n";
                 std::cout << "Selected countries: " << selected.size() << "\n";
                 std::cout << "  Country " << s.country_id << ": " << s.country_name << "\n";

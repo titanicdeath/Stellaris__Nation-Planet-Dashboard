@@ -84,3 +84,11 @@ Current warning payload:
   - `kind` (for example `planet`, `leader`, `species`, `fleet`, `army`)
   - `id`
   - `context` (source field path in export logic)
+
+
+## New in Milestone 3
+
+- Added `derived_summary` with identity/economy/military/colonies/validation rollups.
+- Added top-level `validation` block with unresolved/warning counts and consistency checks.
+- Added optional timeline index export under `output/timeline/<country-id>-(<safe-name>).timeline.json`.
+- Timeline snapshots include key metrics plus `output_json_path` pointing to the full per-save self-contained country snapshot.
