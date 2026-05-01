@@ -152,6 +152,28 @@ static std::string string_hash_fnv1a64(const std::string& s) {
     return hex64(fnv1a64_bytes(s.data(), s.size()));
 }
 
+static bool looks_like_valid_json_object(const std::string& s) {
+    bool in_string = false;
+    bool escape = false;
+    int brace_depth = 0;
+    int bracket_depth = 0;
+    for (char c : s) {
+        if (in_string) {
+            if (escape) { escape = false; continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') { in_string = true; continue; }
+        if (c == '{') brace_depth++;
+        else if (c == '}') brace_depth--;
+        else if (c == '[') bracket_depth++;
+        else if (c == ']') bracket_depth--;
+        if (brace_depth < 0 || bracket_depth < 0) return false;
+    }
+    return !in_string && brace_depth == 0 && bracket_depth == 0;
+}
+
 // ================================================================
 // Settings
 // ================================================================
@@ -1319,8 +1341,13 @@ static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxV
                 auto iit = ix.construction_items.find(item_id);
                 j.begin_object();
                 j.key("item_id"); j.value(item_id);
-                if (iit != ix.construction_items.end()) write_pdx_as_json(j, iit->second);
-                else { j.key("resolved"); j.value(false); }
+                if (iit != ix.construction_items.end()) {
+                    j.key("resolved"); j.value(true);
+                    j.key("item");
+                    write_pdx_as_json(j, iit->second);
+                } else {
+                    j.key("resolved"); j.value(false);
+                }
                 j.end_object();
             }
             j.end_array();
@@ -1711,6 +1738,14 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     }
 
     j.end_object();
+    out.flush();
+    out.close();
+
+    // Lightweight post-write JSON sanity check (detect malformed output early).
+    const std::string emitted = read_text_file(out_path);
+    if (!looks_like_valid_json_object(emitted)) {
+        throw std::runtime_error("Exported invalid JSON: " + out_path.string());
+    }
     return {summary, timeline};
 }
 
@@ -1889,6 +1924,53 @@ int main(int argc, char** argv) {
             }), manifest.end());
             manifest.push_back(std::move(me));
             save_manifest(st.manifest_path, manifest, st.pretty_json);
+        }
+
+        if (st.export_timeline) {
+            fs::path timeline_dir = st.output_path / "timeline";
+            for (auto& kv : timeline_by_country) {
+                if (kv.second.empty()) continue;
+                std::sort(kv.second.begin(), kv.second.end(), [](const TimelinePoint& a, const TimelinePoint& b) { return a.game_date < b.game_date; });
+                const TimelinePoint& last = kv.second.back();
+                fs::path tfile = timeline_dir / (kv.first + "-(" + sanitize_filename(last.country_name) + ").timeline.json");
+                fs::create_directories(tfile.parent_path());
+                std::ofstream tout(tfile, std::ios::binary);
+                JsonWriter tj(tout, st.pretty_json);
+                tj.begin_object();
+                tj.key("schema_version"); tj.value("dashboard-country-timeline-v0.1");
+                tj.key("country_id"); tj.value(kv.first);
+                tj.key("country_name"); tj.value(last.country_name);
+                tj.key("snapshots"); tj.begin_array();
+                for (const auto& p : kv.second) {
+                    tj.begin_object();
+                    tj.key("game_date"); tj.value(p.game_date);
+                    tj.key("save_file"); tj.value(p.save_file);
+                    tj.key("country_id"); tj.value(p.country_id);
+                    tj.key("country_name"); tj.value(p.country_name);
+                    tj.key("colony_count"); tj.value(p.colony_count);
+                    tj.key("total_pops"); tj.value(p.total_pops);
+                    tj.key("military_power"); tj.value(p.military_power);
+                    tj.key("economy_power"); tj.value(p.economy_power);
+                    tj.key("tech_power"); tj.value(p.tech_power);
+                    tj.key("victory_score"); tj.value(p.victory_score);
+                    tj.key("victory_rank"); tj.value(p.victory_rank);
+                    tj.key("fleet_size"); tj.value(p.fleet_size);
+                    tj.key("used_naval_capacity"); tj.value(p.used_naval_capacity);
+                    tj.key("empire_size"); tj.value(p.empire_size);
+                    tj.key("warning_count"); tj.raw_number(std::to_string(p.warnings));
+                    tj.key("unresolved_reference_count"); tj.raw_number(std::to_string(p.unresolved_references));
+                    tj.key("output_json_path"); tj.value(fs::absolute(p.output_file).string());
+                    tj.end_object();
+                }
+                tj.end_array();
+                tj.end_object();
+                tout.flush();
+                tout.close();
+                const std::string timeline_json = read_text_file(tfile);
+                if (!looks_like_valid_json_object(timeline_json)) {
+                    throw std::runtime_error("Exported invalid timeline JSON: " + tfile.string());
+                }
+            }
         }
 
         std::cout << "\nDone. Manifest: " << st.manifest_path << "\n";
