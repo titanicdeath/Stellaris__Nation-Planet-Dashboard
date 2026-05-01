@@ -727,6 +727,26 @@ static const PdxValue* nested_child(const PdxValue* root, std::initializer_list<
     return cur;
 }
 
+static std::string detect_player_country_id(const PdxValue* root) {
+    // Supports both:
+    //   player={ country=0 }
+    // and Stellaris saves that wrap player data in anonymous objects:
+    //   player={ { name="Titanic" country=0 } }
+    const PdxValue* player = child(root, "player");
+    if (!player || player->kind != PdxValue::Kind::Container) return "";
+
+    std::string direct = scalar_or(child(player, "country"));
+    if (!direct.empty()) return direct;
+
+    for (const auto& e : player->entries) {
+        if (e.key.empty()) {
+            std::string nested = scalar_or(child(e.value, "country"));
+            if (!nested.empty()) return nested;
+        }
+    }
+    return "";
+}
+
 static void write_source(JsonWriter& j, const PdxValue* v) {
     if (!v) { j.value(nullptr); return; }
     j.begin_object();
@@ -1384,7 +1404,7 @@ static std::vector<std::string> select_country_ids(const Settings& st, const Sav
         return ids;
     }
     if (st.player_only) {
-        std::string pid = scalar_or(nested_child(ix.root, {"player", "country"}));
+        std::string pid = detect_player_country_id(ix.root);
         if (!pid.empty()) ids.push_back(pid);
         return ids;
     }
