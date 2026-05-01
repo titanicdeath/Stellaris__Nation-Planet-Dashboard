@@ -985,6 +985,24 @@ struct SaveIndexes {
     std::unordered_map<std::string, const PdxValue*> construction_items;
 };
 
+struct UnresolvedReference {
+    std::string kind;
+    std::string id;
+    std::string context;
+};
+
+struct CountryExportSummary {
+    std::string country_id;
+    std::string country_name;
+    std::string capital_id;
+    std::string capital_name;
+    size_t owned_planets = 0;
+    size_t exported_colonies = 0;
+    size_t unresolved_references = 0;
+    size_t warnings = 0;
+    fs::path output_file;
+};
+
 static SaveIndexes build_indexes(const PdxValue* root) {
     SaveIndexes ix;
     ix.root = root;
@@ -1411,7 +1429,7 @@ static std::vector<std::string> select_country_ids(const Settings& st, const Sav
     return st.nation_ids;
 }
 
-static void write_country_output(const fs::path& out_path,
+static CountryExportSummary write_country_output(const fs::path& out_path,
                                  const std::string& save_file_name,
                                  const std::string& game_date,
                                  const std::string& country_id,
@@ -1419,6 +1437,10 @@ static void write_country_output(const fs::path& out_path,
                                  const SaveIndexes& ix,
                                  const Settings& st,
                                  const DefinitionIndex* defs) {
+    CountryExportSummary summary;
+    summary.country_id = country_id;
+    summary.country_name = get_country_name(country);
+    summary.output_file = out_path;
     fs::create_directories(out_path.parent_path());
     std::ofstream out(out_path, std::ios::binary);
     if (!out) throw std::runtime_error("Could not write output: " + out_path.string());
@@ -1449,7 +1471,7 @@ static void write_country_output(const fs::path& out_path,
     j.key("country");
     j.begin_object();
     j.key("country_id"); j.value(country_id);
-    j.key("name"); j.value(get_country_name(country));
+    j.key("name"); j.value(summary.country_name);
     j.key("adjective"); j.value(localized_name(child(country, "adjective")));
     for (const std::string& k : {"type", "personality", "capital", "starting_system", "military_power", "economy_power", "tech_power", "victory_rank", "victory_score", "fleet_size", "used_naval_capacity", "empire_size", "num_sapient_pops", "employable_pops", "starbase_capacity", "num_upgraded_starbase", "graphical_culture", "city_graphical_culture", "room"}) {
         if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); }
@@ -1468,17 +1490,36 @@ static void write_country_output(const fs::path& out_path,
     j.end_object();
 
     j.key("capital_planet");
+    std::vector<UnresolvedReference> unresolved_refs;
+
+    auto add_unresolved = [&](const std::string& kind, const std::string& id, const std::string& ctx) {
+        unresolved_refs.push_back(UnresolvedReference{kind, id, ctx});
+    };
+
     std::string capital_id = scalar_or(child(country, "capital"));
+    summary.capital_id = capital_id;
     auto capital_it = ix.planets.find(capital_id);
-    if (!capital_id.empty() && capital_it != ix.planets.end()) write_planet(j, capital_id, capital_it->second, ix, st, defs, referenced_species, referenced_leaders);
-    else j.value(nullptr);
+    if (!capital_id.empty() && capital_it != ix.planets.end()) {
+        summary.capital_name = localized_name(child(capital_it->second, "name"));
+        write_planet(j, capital_id, capital_it->second, ix, st, defs, referenced_species, referenced_leaders);
+    } else {
+        if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
+        j.value(nullptr);
+    }
 
     j.key("colonies");
     j.begin_array();
-    for (const std::string& pid : scalar_id_list_from_child(country, "owned_planets")) {
+    const std::vector<std::string> owned_planets = scalar_id_list_from_child(country, "owned_planets");
+    summary.owned_planets = owned_planets.size();
+    for (const std::string& pid : owned_planets) {
         auto it = ix.planets.find(pid);
-        if (it != ix.planets.end()) write_planet(j, pid, it->second, ix, st, defs, referenced_species, referenced_leaders);
-        else { j.begin_object(); j.key("planet_id"); j.value(pid); j.key("resolved"); j.value(false); j.end_object(); }
+        if (it != ix.planets.end()) {
+            write_planet(j, pid, it->second, ix, st, defs, referenced_species, referenced_leaders);
+            summary.exported_colonies++;
+        } else {
+            add_unresolved("planet", pid, "country.owned_planets");
+            j.begin_object(); j.key("planet_id"); j.value(pid); j.key("resolved"); j.value(false); j.end_object();
+        }
     }
     j.end_array();
 
@@ -1492,7 +1533,7 @@ static void write_country_output(const fs::path& out_path,
     for (const std::string& fid : country_owned_fleet_ids(country)) {
         auto it = ix.fleets.find(fid);
         if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders);
-        else { j.begin_object(); j.key("fleet_id"); j.value(fid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); j.value(fid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_array();
 
@@ -1514,6 +1555,7 @@ static void write_country_output(const fs::path& out_path,
             if (!sid.empty()) referenced_species.insert(sid);
             if (st.include_source_locations) { j.key("source"); write_source(j, it->second); }
         } else {
+            add_unresolved("army", aid, "country.owned_armies");
             j.key("resolved"); j.value(false);
         }
         j.end_object();
@@ -1526,7 +1568,7 @@ static void write_country_output(const fs::path& out_path,
         j.key(sid);
         auto it = ix.species.find(sid);
         if (it != ix.species.end()) write_resolved_species(j, sid, it->second, st, defs);
-        else { j.begin_object(); j.key("species_id"); j.value(sid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("species", sid, "country.species"); j.begin_object(); j.key("species_id"); j.value(sid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
 
@@ -1536,7 +1578,7 @@ static void write_country_output(const fs::path& out_path,
         j.key(lid);
         auto it = ix.leaders.find(lid);
         if (it != ix.leaders.end()) write_resolved_leader(j, lid, it->second, st, ix, defs);
-        else { j.begin_object(); j.key("leader_id"); j.value(lid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("leader", lid, "country.leaders"); j.begin_object(); j.key("leader_id"); j.value(lid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
 
@@ -1547,6 +1589,22 @@ static void write_country_output(const fs::path& out_path,
     j.key("referenced_species_ids"); j.begin_array(); for (const auto& sid : referenced_species) j.value(sid); j.end_array();
     j.key("referenced_leader_ids"); j.begin_array(); for (const auto& lid : referenced_leaders) j.value(lid); j.end_array();
     j.end_object();
+
+    j.key("warnings");
+    j.begin_object();
+    j.key("unresolved_references");
+    j.begin_array();
+    for (const auto& ur : unresolved_refs) {
+        j.begin_object();
+        j.key("kind"); j.value(ur.kind);
+        j.key("id"); j.value(ur.id);
+        j.key("context"); j.value(ur.context);
+        j.end_object();
+    }
+    j.end_array();
+    j.end_object();
+    summary.unresolved_references = unresolved_refs.size();
+    summary.warnings = unresolved_refs.size();
 
     if (st.include_debug_sections) {
         j.key("debug");
@@ -1569,6 +1627,35 @@ static void write_country_output(const fs::path& out_path,
     }
 
     j.end_object();
+    return summary;
+}
+
+static bool run_parser_self_tests() {
+    struct Case { std::string name; std::string input; };
+    const std::vector<Case> cases = {
+        {"duplicate keys", "planet=1 planet=2 planet=3"},
+        {"anonymous objects", "player={ { name=\"Titanic\" country=0 } }"},
+        {"primitive lists", "owned_planets={ 2 3 4 }"},
+        {"nested objects", "country={ capital=2 stats={ pops=42 } }"},
+        {"quoted strings", "name=\"Tetran Sacrosanct Imperium\""},
+        {"bare identifiers", "type=default ethos={ ethic_fanatic_materialist }"},
+        {"yes/no bools", "is_ai=no has_gateway=yes"},
+        {"empty objects", "flags={}"},
+        {"player wrapper", "player={ { name=\"Titanic\" country=0 } }"},
+    };
+    bool ok = true;
+    for (const auto& tc : cases) {
+        try {
+            PdxParser parser(tc.input);
+            PdxDocument doc = parser.parse_document();
+            (void)doc;
+            std::cout << "[self-test] PASS: " << tc.name << "\n";
+        } catch (const std::exception& ex) {
+            ok = false;
+            std::cout << "[self-test] FAIL: " << tc.name << " -> " << ex.what() << "\n";
+        }
+    }
+    return ok;
 }
 
 // ================================================================
@@ -1621,8 +1708,10 @@ int main(int argc, char** argv) {
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if ((arg == "--config" || arg == "-c") && i + 1 < argc) config = argv[++i];
-            else if (arg == "--help" || arg == "-h") {
-                std::cout << "Usage: stellaris_parser --config settings.config\n";
+            else if (arg == "--self-test") {
+                return run_parser_self_tests() ? 0 : 1;
+            } else if (arg == "--help" || arg == "-h") {
+                std::cout << "Usage: stellaris_parser --config settings.config [--self-test]\n";
                 return 0;
             }
         }
@@ -1689,8 +1778,20 @@ int main(int argc, char** argv) {
                 }
                 std::string cname = get_country_name(it->second);
                 fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ").json");
-                std::cout << "Writing " << out_file << "\n";
-                write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                CountryExportSummary s = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                std::cout << "Save: " << game_date << "\n";
+                std::cout << "Selected countries: " << selected.size() << "\n";
+                std::cout << "  Country " << s.country_id << ": " << s.country_name << "\n";
+                if (!s.capital_id.empty()) {
+                    std::cout << "    Capital: " << s.capital_id << " / " << (s.capital_name.empty() ? "<unknown>" : s.capital_name) << "\n";
+                } else {
+                    std::cout << "    Capital: <none>\n";
+                }
+                std::cout << "    Owned planets: " << s.owned_planets << "\n";
+                std::cout << "    Exported colonies: " << s.exported_colonies << "\n";
+                std::cout << "    Unresolved references: " << s.unresolved_references << "\n";
+                std::cout << "    Warnings: " << s.warnings << "\n";
+                std::cout << "    Wrote: " << out_file << "\n";
                 me.outputs.push_back(fs::absolute(out_file).string());
             }
 
