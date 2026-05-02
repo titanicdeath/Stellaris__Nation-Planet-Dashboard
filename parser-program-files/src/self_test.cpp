@@ -1,0 +1,30 @@
+#include "self_test.hpp"
+#include "ast.hpp"
+#include "pdx_parser.hpp"
+
+bool run_parser_self_tests() {
+    struct Case { std::string name; std::string input; };
+    const std::vector<Case> cases = {
+        {"duplicate keys", "planet=1 planet=2 planet=3"},
+        {"anonymous objects", "player={ { name=\"Titanic\" country=0 } }"},
+        {"primitive lists", "owned_planets={ 2 3 4 }"},
+        {"nested objects", "country={ capital=2 stats={ pops=42 } }"},
+        {"quoted strings", "name=\"Tetran Sacrosanct Imperium\""},
+        {"bare identifiers", "type=default ethos={ ethic_fanatic_materialist }"},
+        {"yes/no bools", "is_ai=no has_gateway=yes"},
+        {"empty objects", "flags={}"},
+        {"player wrapper", "player={ { name=\"Titanic\" country=0 } }"},
+    };
+    bool ok = true;
+    for (const auto& tc : cases) {
+        try {
+            PdxDocument doc = parse_document(tc.input);
+            (void)doc;
+            std::cout << "[self-test] PASS: " << tc.name << "\n";
+        } catch (const std::exception& ex) {
+            ok = false;
+            std::cout << "[self-test] FAIL: " << tc.name << " -> " << ex.what() << "\n";
+        }
+    }
+    return ok;
+}

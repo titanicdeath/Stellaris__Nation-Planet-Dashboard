@@ -8,7 +8,24 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ZLIB REQUIRED)
 
 add_executable(stellaris_parser
+    parser-program-files/src/ast.cpp
+    parser-program-files/src/cli.cpp
+    parser-program-files/src/config.cpp
+    parser-program-files/src/country_export.cpp
+    parser-program-files/src/game_indexes.cpp
+    parser-program-files/src/json_writer.cpp
     parser-program-files/src/main.cpp
+    parser-program-files/src/manifest.cpp
+    parser-program-files/src/pdx_parser.cpp
+    parser-program-files/src/performance.cpp
+    parser-program-files/src/save_reader.cpp
+    parser-program-files/src/self_test.cpp
+    parser-program-files/src/timeline_export.cpp
+    parser-program-files/src/utils.cpp
+)
+
+target_include_directories(stellaris_parser PRIVATE
+    parser-program-files/include
 )
 
 target_link_libraries(stellaris_parser PRIVATE ZLIB::ZLIB)
