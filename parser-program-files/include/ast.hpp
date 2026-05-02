@@ -40,3 +40,10 @@ const PdxValue* nested_child(const PdxValue* root, std::initializer_list<std::st
 std::string detect_player_country_id(const PdxValue* root);
 void write_source(JsonWriter& j, const PdxValue* v);
 void write_pdx_as_json(JsonWriter& j, const PdxValue* v, int max_depth = 40);
+bool is_json_id_reference_field(const std::string& key);
+std::string id_to_json_string(const PdxValue* v);
+void write_id(JsonWriter& j, const std::string& id);
+void write_id(JsonWriter& j, const PdxValue* v);
+void write_id_array(JsonWriter& j, const std::vector<std::string>& ids);
+void write_id_array(JsonWriter& j, const std::set<std::string>& ids);
+void write_pdx_as_schema_json(JsonWriter& j, const PdxValue* v, const std::string& current_key = "", const std::string& parent_key = "", int max_depth = 40);

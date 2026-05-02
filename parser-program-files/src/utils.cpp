@@ -151,6 +151,13 @@ std::string output_date_folder(const std::string& date) {
     return sanitize_filename(date);
 }
 
+std::string output_date_suffix(const std::string& date) {
+    if (date.empty()) return "unknown-date";
+    std::string out = date;
+    std::replace(out.begin(), out.end(), '.', '-');
+    return sanitize_filename(out);
+}
+
 // ================================================================
 // Settings
 // ================================================================

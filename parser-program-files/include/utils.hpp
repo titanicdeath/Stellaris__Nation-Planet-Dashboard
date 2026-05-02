@@ -19,3 +19,4 @@ std::string file_hash_fnv1a64(const fs::path& p);
 std::string string_hash_fnv1a64(const std::string& s);
 bool looks_like_valid_json_object(const std::string& s);
 std::string output_date_folder(const std::string& date);
+std::string output_date_suffix(const std::string& date);

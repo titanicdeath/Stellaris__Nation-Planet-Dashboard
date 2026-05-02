@@ -2,14 +2,22 @@
 
 This document describes the practical JSON contract emitted by the parser for one selected country.
 
+Per-country files are written under `output/<game-date>/` and include the save date in the filename:
+
+```txt
+output/2220.12.16/0-(Tetra)_2220-12-16.json
+```
+
+The folder keeps the dotted save date. The filename suffix uses `_YYYY-MM-DD`.
+
 ## Top-level fields
 
 - `schema_version`: Current schema label (`dashboard-country-v0.1`).
 - `parser_version`: Parser build/version string.
 - `save`: Save metadata (`file`, `game_date`, version/name when available).
 - `country`: Selected country data and metrics.
-- `economy`: Prominent country-level economy summary; this is the preferred dashboard location for `stored_resources`.
-- `capital_planet`: Expanded planet object for `country.capital`, or `null`.
+- `nat_finance_economy`: The only top-level finance and stockpile block.
+- `capital_planet`: Navigation stub for `country.capital`, or `null`.
 - `colonies`: Expanded array of owned planets (`country.owned_planets`).
 - `controlled_planet_ids`: Raw controlled planet IDs.
 - `systems`: Selected-country relevant star system context, keyed by system ID.
@@ -17,7 +25,6 @@ This document describes the practical JSON contract emitted by the parser for on
 - `fleets`: Fleet summaries owned by the country.
 - `owned_armies`: Top-level non-defense army placeholders/legacy list. Defense armies are not part of the export contract.
 - `army_formations`: Grouped non-defense army formation summaries.
-- `stored_resources`: Current stockpiled resources from the country standard economy module resources path.
 - `species`: Referenced species objects, keyed by species ID.
 - `demographics`: Empire-level census rollup derived from owned colonies.
 - `workforce_summary`: Empire-level job, workforce, and pop category rollups.
@@ -43,27 +50,32 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - `type`, `personality`, `capital`, `starting_system`
 - power/score/economy/naval/pop metrics
 - `founder_species_ref`, `built_species_ref`
-- optional blocks (`flag`, `ethics`, `government`, `budget`, etc.)
+- optional blocks (`flag`, `ethics`, `government`, etc.)
 
-## `economy`
+## `nat_finance_economy`
 
-`economy` is a top-level country summary block intended for dashboard display. It appears near `country` and includes major country-level statistical and economic fields when present:
+`nat_finance_economy` is the only emitted country finance/stockpile block. It contains:
 
-- `economy_power`
-- `tech_power`
-- `empire_size`
-- `victory_score`
-- `victory_rank`
-- `num_sapient_pops`
-- `employable_pops`
-- `monthly_net_resources`
-- `stored_resources`
+- `budget.income`: `country.budget.current_month.income`
+- `budget.expenses`: `country.budget.current_month.expenses`
+- `budget.balance`: `country.budget.current_month.balance`
+- `net_monthly_resource`: Resource totals derived by summing all current-month `budget.balance` source categories by resource. Negative values stay negative; effectively zero totals are omitted.
+- `stored_resources`: Current stockpiled resources from the country standard economy module resources path.
 
-`economy.stored_resources` is the prominent stockpile location and preferred source for dashboard display. The legacy top-level `stored_resources` field may also be emitted for compatibility, but deeply nested paths are not the primary display location.
+`stored_resources` appears only at `nat_finance_economy.stored_resources`. The old top-level `stored_resources`, top-level `economy`, `country.budget`, and `derived_summary.economy.stored_resources` locations are not emitted.
 
 ## `capital_planet` and `colonies`
 
-`capital_planet` and each object in `colonies` include:
+`capital_planet` is a compact navigation stub:
+
+- `planet_id`
+- `name`
+- `system_id`
+- `system_name`
+
+The full capital colony data lives in `colonies[]`; consumers should join by `planet_id`.
+
+Each object in `colonies` includes:
 
 - identity (`planet_id`, `name`, ownership)
 - economy/planet state fields where available
@@ -71,6 +83,8 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - `derived_summary` for dashboard-ready colony facts and card display
 - optional governor details
 - optional local source sections (depending on config)
+
+Colonies do not embed a top-level `system` object. Use `colonies[].derived_summary.system_id`, `colonies[].derived_summary.system_name`, or `colonies[].derived_summary.map`, then join to top-level `systems[system_id]` for full system data.
 
 If a referenced planet cannot be resolved, a placeholder object with `resolved=false` is emitted and an unresolved warning entry is added.
 
@@ -141,6 +155,12 @@ Both are keyed objects where keys are IDs referenced from the selected country c
 - unresolved entries include `resolved=false`
 - unresolved entries are mirrored in `warnings.unresolved_references`
 
+## ID and Reference Types
+
+JSON ID/reference values are strings everywhere in the dashboard schema. This includes fields ending in `_id` or `_ids`, object keys under top-level `systems`, `species`, and `leaders`, and known references such as `owner`, `controller`, `original_owner`, `capital`, `starting_system`, `home_planet`, `species`, `country`, `heir`, `council_positions`, `subjects`, `planet`, `spawning_planet`, `pop_faction`, and `sector`.
+
+`coordinate.origin` is the explicit exception. It remains numeric because it belongs to the coordinate triple and can use the unsigned sentinel `4294967295` for galactic-root/no-parent coordinates.
+
 ## `demographics`
 
 `demographics` is a top-level empire census rollup built from resolved owned colonies. It is intended for dashboard display and does not replace the raw/resolved colony and species sections.
@@ -199,7 +219,7 @@ Defense armies are not part of the country JSON export contract. They are filter
 
 ## `stored_resources`
 
-`economy.stored_resources` is the preferred source of truth for current country stockpiles. It is copied from `country.standard_economy_module.resources`, or from the live-save module path `country.modules.standard_economy_module.resources`, and may include resources such as energy, minerals, food, research, influence, unity, trade value, consumer goods, alloys, strategic resources, and minor artifacts when present in the save. The top-level `stored_resources` field may remain as a compatibility duplicate.
+`nat_finance_economy.stored_resources` is the source of truth for current country stockpiles. It is copied from `country.standard_economy_module.resources`, or from the live-save module path `country.modules.standard_economy_module.resources`, and may include resources such as energy, minerals, food, research, influence, unity, trade value, consumer goods, alloys, strategic resources, and minor artifacts when present in the save.
 
 ## `references`
 
@@ -246,8 +266,8 @@ Current top-level validation fields include:
 - `non_military_fleet_records_suppressed`: Owned fleet-like records excluded from top-level military `fleets`.
 - `defense_armies_suppressed`: Numeric total of defense armies filtered before export.
 - `army_formations_count`: Number of grouped non-defense army formations exported.
-- `has_stored_resources`: Whether `economy.stored_resources` contains at least one named resource.
-- `stored_resource_count`: Number of named entries under `economy.stored_resources`.
+- `has_stored_resources`: Whether `nat_finance_economy.stored_resources` contains at least one named resource.
+- `stored_resource_count`: Number of named entries under `nat_finance_economy.stored_resources`.
 
 
 ## New in Milestone 3
@@ -262,7 +282,7 @@ Current top-level validation fields include:
 - Made inactive/sentinel pop job records non-exportable; only numeric suppression totals remain.
 - Changed top-level `fleets` to military fleets only, with suppressed non-military fleet counts in validation.
 - Made defense army records non-exportable and added grouped `army_formations` for non-defense armies.
-- Added top-level `economy.stored_resources` from the country standard economy module resources path.
+- Added country stockpile export from the country standard economy module resources path.
 
 ## New in Milestone 3B-1
 
@@ -286,3 +306,12 @@ Current top-level validation fields include:
 - Linked colony `derived_summary.system_id`/`system_name` to the top-level system subset without duplicating full system objects inside colonies.
 - Added validation fields for exported system counts, missing coordinates, missing colony systems, colonies whose resolved systems were not exported, and hyperlane targets outside the selected subset.
 - Documented current limits around full galaxy export, political borders, and hyperlane target coverage.
+
+## PR 1 Core Schema Cleanup
+
+- Per-country filenames now include `_YYYY-MM-DD` before `.json`.
+- Added `nat_finance_economy` as the only finance/stockpile block, with current-month budget, derived `net_monthly_resource`, and `stored_resources`.
+- Removed duplicate stockpile locations: top-level `stored_resources`, top-level `economy`, `country.budget`, and `derived_summary.economy.stored_resources`.
+- Changed `capital_planet` from a full colony copy to a navigation stub.
+- Removed top-level `colonies[].system`; full system data lives in top-level `systems`.
+- Standardized JSON ID/reference values as strings, except numeric `coordinate.origin`.

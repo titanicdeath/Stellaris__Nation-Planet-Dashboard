@@ -4,7 +4,7 @@
 
 void json_optional_scalar(JsonWriter& j, const PdxValue* obj, const std::string& key) {
     j.key(key);
-    if (const PdxValue* v = child(obj, key)) write_pdx_as_json(j, v);
+    if (const PdxValue* v = child(obj, key)) write_pdx_as_schema_json(j, v, key);
     else j.value(nullptr);
 }
 
@@ -133,7 +133,7 @@ bool is_defense_army(const PdxValue* army);
 
 void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue* sp, const Settings& st, const DefinitionIndex* defs) {
     j.begin_object();
-    j.key("species_id"); j.value(id);
+    j.key("species_id"); write_id(j, id);
     j.key("name"); j.value(localized_name(child(sp, "name")));
     j.key("plural"); j.value(localized_name(child(sp, "plural")));
     j.key("adjective"); j.value(localized_name(child(sp, "adjective")));
@@ -152,14 +152,14 @@ void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue
     }
     j.end_array();
     if (st.include_source_locations) { j.key("source"); write_source(j, sp); }
-    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, sp); }
+    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, sp, "raw"); }
     j.end_object();
 }
 
 void write_resolved_leader(JsonWriter& j, const std::string& id, const PdxValue* leader, const Settings& st, const SaveIndexes& ix, const DefinitionIndex* defs) {
     (void)ix;
     j.begin_object();
-    j.key("leader_id"); j.value(id);
+    j.key("leader_id"); write_id(j, id);
     j.key("name"); j.value(localized_name(child(leader, "name")));
     json_optional_scalar(j, leader, "class");
     json_optional_scalar(j, leader, "level");
@@ -176,40 +176,40 @@ void write_resolved_leader(JsonWriter& j, const std::string& id, const PdxValue*
         j.end_object();
     }
     j.end_array();
-    if (const PdxValue* loc = child(leader, "location")) { j.key("location"); write_pdx_as_json(j, loc); }
+    if (const PdxValue* loc = child(leader, "location")) { j.key("location"); write_pdx_as_schema_json(j, loc, "location"); }
     if (st.include_source_locations) { j.key("source"); write_source(j, leader); }
-    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, leader); }
+    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, leader, "raw"); }
     j.end_object();
 }
 
 void write_instance_with_type(JsonWriter& j, const std::string& id, const PdxValue* obj, const std::string& id_name, const Settings& st, const DefinitionIndex* defs) {
     j.begin_object();
-    j.key(id_name); j.value(id);
+    j.key(id_name); write_id(j, id);
     std::string type = scalar_or(child(obj, "type"));
     const bool type_is_safe = !type.empty() && !contains_banned_job_export_token(type);
     if (type_is_safe) { j.key("type"); j.value(type); }
     if (defs && type_is_safe) { j.key("definition_source"); write_definition_source(j, defs, type); }
-    if (const PdxValue* pos = child(obj, "position")) { j.key("position"); write_pdx_as_json(j, pos); }
-    if (const PdxValue* lvl = child(obj, "level")) { j.key("level"); write_pdx_as_json(j, lvl); }
+    if (const PdxValue* pos = child(obj, "position")) { j.key("position"); write_pdx_as_schema_json(j, pos, "position"); }
+    if (const PdxValue* lvl = child(obj, "level")) { j.key("level"); write_pdx_as_schema_json(j, lvl, "level"); }
     if (st.include_source_locations) { j.key("source"); write_source(j, obj); }
-    if (st.include_raw_pdx_objects && !contains_banned_job_export_token(type)) { j.key("raw"); write_pdx_as_json(j, obj); }
+    if (st.include_raw_pdx_objects && !contains_banned_job_export_token(type)) { j.key("raw"); write_pdx_as_schema_json(j, obj, "raw"); }
     j.end_object();
 }
 
 void write_system_summary(JsonWriter& j, const std::string& id, const PdxValue* sys, const Settings& st) {
     j.begin_object();
-    j.key("system_id"); j.value(id);
+    j.key("system_id"); write_id(j, id);
     j.key("name"); j.value(localized_name(child(sys, "name")));
-    if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
+    if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
     json_optional_scalar(j, sys, "type");
     json_optional_scalar(j, sys, "star_class");
     json_optional_scalar(j, sys, "sector");
     j.key("planet_ids");
     j.begin_array();
-    for (const PdxValue* pv : children(sys, "planet")) j.value(scalar_or(pv));
+    for (const PdxValue* pv : children(sys, "planet")) write_id(j, pv);
     j.end_array();
-    if (const PdxValue* h = child(sys, "hyperlane")) { j.key("hyperlanes"); write_pdx_as_json(j, h); }
-    if (const PdxValue* sb = child(sys, "starbases")) { j.key("starbases"); write_pdx_as_json(j, sb); }
+    if (const PdxValue* h = child(sys, "hyperlane")) { j.key("hyperlanes"); write_pdx_as_schema_json(j, h, "hyperlanes"); }
+    if (const PdxValue* sb = child(sys, "starbases")) { j.key("starbases"); write_pdx_as_schema_json(j, sb, "starbases"); }
     if (st.include_source_locations) { j.key("source"); write_source(j, sys); }
     j.end_object();
 }
@@ -422,26 +422,23 @@ void write_system_context(JsonWriter& j,
                                  const MapSystemContext& ctx,
                                  const Settings& st) {
     j.begin_object();
-    j.key("system_id"); j.value(system_id);
+    j.key("system_id"); write_id(j, system_id);
     j.key("name"); j.value(localized_name(child(sys, "name")));
-    if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
+    if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
     json_optional_scalar(j, sys, "star_class");
     json_optional_scalar(j, sys, "type");
     json_optional_scalar(j, sys, "sector");
-    j.key("planet_ids");
-    j.begin_array();
-    for (const std::string& pid : system_planet_ids(sys)) j.value(pid);
-    j.end_array();
-    j.key("colony_planet_ids"); write_string_array(j, ctx.colony_planet_ids);
-    j.key("owned_planet_ids"); write_string_array(j, ctx.owned_planet_ids);
-    j.key("controlled_planet_ids"); write_string_array(j, ctx.controlled_planet_ids);
-    j.key("starbase_ids"); write_string_array(j, ctx.starbase_ids);
+    j.key("planet_ids"); write_id_array(j, system_planet_ids(sys));
+    j.key("colony_planet_ids"); write_id_array(j, ctx.colony_planet_ids);
+    j.key("owned_planet_ids"); write_id_array(j, ctx.owned_planet_ids);
+    j.key("controlled_planet_ids"); write_id_array(j, ctx.controlled_planet_ids);
+    j.key("starbase_ids"); write_id_array(j, ctx.starbase_ids);
     j.key("hyperlanes");
-    if (const PdxValue* h = child(sys, "hyperlane")) write_pdx_as_json(j, h);
+    if (const PdxValue* h = child(sys, "hyperlane")) write_pdx_as_schema_json(j, h, "hyperlanes");
     else { j.begin_array(); j.end_array(); }
     j.key("is_colony_system"); j.value(ctx.is_colony_system);
     j.key("has_capital"); j.value(ctx.has_capital);
-    if (ctx.has_capital) { j.key("capital_planet_id"); j.value(ctx.capital_planet_id); }
+    if (ctx.has_capital) { j.key("capital_planet_id"); write_id(j, ctx.capital_planet_id); }
     if (st.include_source_locations) { j.key("source"); write_source(j, sys); }
     j.end_object();
 }
@@ -471,7 +468,7 @@ void write_map_summary(JsonWriter& j, const MapExportContext& map_ctx) {
     j.begin_object();
     j.key("system_count"); j.raw_number(std::to_string(map_ctx.systems.size()));
     j.key("colony_system_count"); j.raw_number(std::to_string(colony_system_count(map_ctx)));
-    j.key("capital_system_id"); j.value(map_ctx.capital_system_id);
+    j.key("capital_system_id"); write_id(j, map_ctx.capital_system_id);
     j.key("capital_system_name"); j.value(map_ctx.capital_system_name);
     j.key("hyperlane_edge_count"); j.raw_number(std::to_string(map_ctx.hyperlane_edge_count));
     j.key("systems_missing_coordinates"); write_string_array(j, map_ctx.systems_missing_coordinates);
@@ -501,14 +498,66 @@ std::string json_number(double v) {
 void write_optional_child(JsonWriter& j, const PdxValue* obj, const std::string& source_key, const std::string& output_key) {
     if (const PdxValue* v = child(obj, source_key)) {
         j.key(output_key);
-        write_pdx_as_json(j, v);
+        write_pdx_as_schema_json(j, v, output_key);
     }
 }
 
 void write_metric_or_null(JsonWriter& j, const PdxValue* obj, const std::string& key) {
     j.key(key);
-    if (const PdxValue* v = child(obj, key)) write_pdx_as_json(j, v);
+    if (const PdxValue* v = child(obj, key)) write_pdx_as_schema_json(j, v, key);
     else j.value(nullptr);
+}
+
+void accumulate_balance_resources(const PdxValue* v, std::map<std::string, double>& totals) {
+    if (!v || v->kind != PdxValue::Kind::Container) return;
+    for (const auto& e : v->entries) {
+        if (e.key.empty()) {
+            accumulate_balance_resources(e.value, totals);
+            continue;
+        }
+        if (auto amount = scalar_double(e.value)) {
+            totals[e.key] += *amount;
+        } else {
+            accumulate_balance_resources(e.value, totals);
+        }
+    }
+}
+
+void write_budget_child_or_empty(JsonWriter& j, const PdxValue* current_month, const std::string& key) {
+    j.key(key);
+    if (const PdxValue* v = child(current_month, key)) write_pdx_as_schema_json(j, v, key);
+    else { j.begin_object(); j.end_object(); }
+}
+
+void write_nat_finance_economy(JsonWriter& j, const PdxValue* country, const PdxValue* stored_resources) {
+    const PdxValue* current_month = nested_child(country, {"budget", "current_month"});
+    const PdxValue* balance = child(current_month, "balance");
+    std::map<std::string, double> net_monthly;
+    accumulate_balance_resources(balance, net_monthly);
+
+    j.key("nat_finance_economy");
+    j.begin_object();
+    j.key("budget");
+    j.begin_object();
+    write_budget_child_or_empty(j, current_month, "income");
+    write_budget_child_or_empty(j, current_month, "expenses");
+    write_budget_child_or_empty(j, current_month, "balance");
+    j.end_object();
+
+    j.key("net_monthly_resource");
+    j.begin_object();
+    constexpr double epsilon = 0.000000001;
+    for (const auto& [resource, amount] : net_monthly) {
+        if (std::abs(amount) <= epsilon) continue;
+        j.key(resource);
+        j.raw_number(json_number(amount));
+    }
+    j.end_object();
+
+    j.key("stored_resources");
+    if (stored_resources) write_pdx_as_schema_json(j, stored_resources, "stored_resources");
+    else { j.begin_object(); j.end_object(); }
+    j.end_object();
 }
 
 std::string display_token(std::string token) {
@@ -875,7 +924,7 @@ void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographi
     j.begin_object();
     j.key("total_sapient_pops"); j.raw_number(json_number(demographics.total_sapient_pops));
     j.key("species_count"); j.raw_number(std::to_string(demographics.species.size()));
-    j.key("dominant_species_id"); j.value(dominant_species_id);
+    j.key("dominant_species_id"); write_id(j, dominant_species_id);
     j.key("dominant_species_name");
     auto dom_it = demographics.species.find(dominant_species_id);
     if (dom_it != demographics.species.end()) j.value(dom_it->second.name);
@@ -884,7 +933,7 @@ void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographi
     j.begin_array();
     for (const auto& [_, sp] : demographics.species) {
         j.begin_object();
-        j.key("species_id"); j.value(sp.species_id);
+        j.key("species_id"); write_id(j, sp.species_id);
         j.key("name"); j.value(sp.name);
         j.key("plural"); j.value(sp.plural);
         j.key("class"); j.value(sp.species_class);
@@ -905,7 +954,7 @@ void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographi
         j.begin_array();
         for (const auto& dist : sp.planet_distribution) {
             j.begin_object();
-            j.key("planet_id"); j.value(dist.planet_id);
+            j.key("planet_id"); write_id(j, dist.planet_id);
             j.key("planet_name"); j.value(dist.planet_name);
             j.key("pops"); j.raw_number(json_number(dist.pops));
             j.end_object();
@@ -989,13 +1038,13 @@ void write_colony_derived_summary(JsonWriter& j,
 
     j.key("derived_summary");
     j.begin_object();
-    j.key("planet_id"); j.value(planet_id);
+    j.key("planet_id"); write_id(j, planet_id);
     if (!planet_name.empty()) { j.key("planet_name"); j.value(planet_name); }
-    if (!system_id.empty()) { j.key("system_id"); j.value(system_id); }
+    if (!system_id.empty()) { j.key("system_id"); write_id(j, system_id); }
     if (!system_name.empty()) { j.key("system_name"); j.value(system_name); }
     j.key("map");
     j.begin_object();
-    j.key("system_id"); j.value(system_id);
+    j.key("system_id"); write_id(j, system_id);
     j.key("system_name"); j.value(system_name);
     j.end_object();
     write_optional_child(j, planet, "planet_class", "planet_class");
@@ -1029,7 +1078,7 @@ void write_colony_derived_summary(JsonWriter& j,
     j.key("species_counts_by_name");
     if (colony_rollup) write_number_object(j, colony_rollup->species_counts_by_name);
     else { j.begin_object(); j.end_object(); }
-    if (!dominant_species_id.empty()) { j.key("dominant_species_id"); j.value(dominant_species_id); }
+    if (!dominant_species_id.empty()) { j.key("dominant_species_id"); write_id(j, dominant_species_id); }
     if (!dominant_species_name.empty()) { j.key("dominant_species_name"); j.value(dominant_species_name); }
     j.key("species_count"); j.raw_number(std::to_string(species_counts.size()));
     j.key("warning_count"); j.raw_number("0");
@@ -1051,7 +1100,7 @@ void write_colony_derived_summary(JsonWriter& j,
     j.key("role"); j.value(role);
     j.key("primary_metric_label"); j.value("Pops");
     j.key("primary_metric_value");
-    if (const PdxValue* pops = child(planet, "num_sapient_pops")) write_pdx_as_json(j, pops);
+    if (const PdxValue* pops = child(planet, "num_sapient_pops")) write_pdx_as_schema_json(j, pops, "num_sapient_pops");
     else j.value(nullptr);
     j.key("secondary_metrics");
     j.begin_object();
@@ -1067,7 +1116,7 @@ void write_colony_derived_summary(JsonWriter& j,
 
 void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, const ColonyDemographicRollup* colony_rollup, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
     j.begin_object();
-    j.key("planet_id"); j.value(planet_id);
+    j.key("planet_id"); write_id(j, planet_id);
     j.key("name"); j.value(localized_name(child(planet, "name")));
     json_optional_scalar(j, planet, "planet_class");
     json_optional_scalar(j, planet, "planet_size");
@@ -1077,25 +1126,17 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     json_optional_scalar(j, planet, "final_designation");
     json_optional_scalar(j, planet, "designation");
     json_optional_scalar(j, planet, "orbit");
-    if (const PdxValue* coord = child(planet, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
-
-    std::string system_id = scalar_or(child(child(planet, "coordinate"), "origin"));
-    if (!system_id.empty()) {
-        j.key("system");
-        auto it = ix.galactic_objects.find(system_id);
-        if (it != ix.galactic_objects.end()) write_system_summary(j, system_id, it->second, st);
-        else { j.begin_object(); j.key("system_id"); j.value(system_id); j.key("resolved"); j.value(false); j.end_object(); }
-    }
+    if (const PdxValue* coord = child(planet, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
 
     j.key("planet_stats");
     j.begin_object();
     for (const std::string& k : {"stability", "crime", "amenities", "amenities_usage", "free_amenities", "free_housing", "total_housing", "housing_usage", "employable_pops", "num_sapient_pops", "ascension_tier"}) {
-        if (const PdxValue* v = child(planet, k)) { j.key(k); write_pdx_as_json(j, v); }
+        if (const PdxValue* v = child(planet, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
     }
     j.end_object();
 
     if (const PdxValue* species_info = child(planet, "species_information")) {
-        j.key("species_information"); write_pdx_as_json(j, species_info);
+        j.key("species_information"); write_pdx_as_schema_json(j, species_info, "species_information");
         for (const auto& e : species_info->entries) if (!e.key.empty()) referenced_species.insert(e.key);
     }
     for (const std::string& sid : scalar_id_list_from_child(planet, "species_refs")) referenced_species.insert(sid);
@@ -1105,9 +1146,9 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     j.begin_array();
     for (const std::string& did : scalar_id_list_from_child(planet, "districts")) {
         auto it = ix.districts.find(did);
-        if (it == ix.districts.end()) { j.begin_object(); j.key("district_id"); j.value(did); j.key("resolved"); j.value(false); j.end_object(); continue; }
+        if (it == ix.districts.end()) { j.begin_object(); j.key("district_id"); write_id(j, did); j.key("resolved"); j.value(false); j.end_object(); continue; }
         j.begin_object();
-        j.key("district_id"); j.value(did);
+        j.key("district_id"); write_id(j, did);
         std::string type = scalar_or(child(it->second, "type"));
         j.key("type"); j.value(type);
         if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
@@ -1117,7 +1158,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         for (const std::string& zid : scalar_id_list_from_child(it->second, "zones")) {
             auto zit = ix.zones.find(zid);
             j.begin_object();
-            j.key("zone_id"); j.value(zid);
+            j.key("zone_id"); write_id(j, zid);
             if (zit != ix.zones.end()) {
                 json_optional_scalar(j, zit->second, "type");
                 j.key("buildings");
@@ -1125,7 +1166,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
                 for (const std::string& bid : scalar_id_list_from_child(zit->second, "buildings")) {
                     auto bit = ix.buildings.find(bid);
                     if (bit != ix.buildings.end()) write_instance_with_type(j, bid, bit->second, "building_id", st, defs);
-                    else { j.begin_object(); j.key("building_id"); j.value(bid); j.key("resolved"); j.value(false); j.end_object(); }
+                    else { j.begin_object(); j.key("building_id"); write_id(j, bid); j.key("resolved"); j.value(false); j.end_object(); }
                 }
                 j.end_array();
             } else {
@@ -1135,7 +1176,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         }
         j.end_array();
         if (st.include_source_locations) { j.key("source"); write_source(j, it->second); }
-        if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, it->second); }
+        if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, it->second, "raw"); }
         j.end_object();
     }
     j.end_array();
@@ -1145,7 +1186,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     for (const std::string& bid : scalar_id_list_from_child(planet, "buildings_cache")) {
         auto it = ix.buildings.find(bid);
         if (it != ix.buildings.end()) write_instance_with_type(j, bid, it->second, "building_id", st, defs);
-        else { j.begin_object(); j.key("building_id"); j.value(bid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { j.begin_object(); j.key("building_id"); write_id(j, bid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_array();
 
@@ -1154,7 +1195,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     for (const std::string& did : scalar_id_list_from_child(planet, "deposits")) {
         auto it = ix.deposits.find(did);
         if (it != ix.deposits.end()) write_instance_with_type(j, did, it->second, "deposit_id", st, defs);
-        else { j.begin_object(); j.key("deposit_id"); j.value(did); j.key("resolved"); j.value(false); j.end_object(); }
+        else { j.begin_object(); j.key("deposit_id"); write_id(j, did); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_array();
 
@@ -1163,18 +1204,18 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     for (const std::string& pgid : scalar_id_list_from_child(planet, "pop_groups")) {
         auto it = ix.pop_groups.find(pgid);
         j.begin_object();
-        j.key("pop_group_id"); j.value(pgid);
+        j.key("pop_group_id"); write_id(j, pgid);
         if (it != ix.pop_groups.end()) {
             if (const PdxValue* key = child(it->second, "key")) {
-                j.key("key"); write_pdx_as_json(j, key);
+                j.key("key"); write_pdx_as_schema_json(j, key, "key");
                 std::string sid = scalar_or(child(key, "species"));
                 if (!sid.empty()) referenced_species.insert(sid);
             }
             for (const std::string& k : {"planet", "size", "fraction", "habitability", "happiness", "power", "crime", "amenities_usage", "housing_usage", "last_month_growth", "month_start_size"}) {
-                if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_json(j, v); }
+                if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
             }
             if (st.include_source_locations) { j.key("source"); write_source(j, it->second); }
-            if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, it->second); }
+            if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, it->second, "raw"); }
         } else {
             j.key("resolved"); j.value(false);
         }
@@ -1188,16 +1229,16 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         auto it = ix.pop_jobs.find(jid);
         if (it == ix.pop_jobs.end() || !is_exportable_pop_job(it->second)) continue;
         j.begin_object();
-        j.key("job_id"); j.value(jid);
+        j.key("job_id"); write_id(j, jid);
         std::string type = scalar_or(child(it->second, "type"));
         j.key("type"); j.value(type);
         if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
         for (const std::string& k : {"workforce", "max_workforce", "bonus_workforce", "workforce_limit", "automated_workforce", "planet"}) {
-            if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_json(j, v); }
+            if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
         }
-        if (const PdxValue* pg = child(it->second, "pop_groups")) { j.key("pop_groups"); write_pdx_as_json(j, pg); }
+        if (const PdxValue* pg = child(it->second, "pop_groups")) { j.key("pop_groups"); write_pdx_as_schema_json(j, pg, "pop_groups"); }
         if (st.include_source_locations) { j.key("source"); write_source(j, it->second); }
-        if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, it->second); }
+        if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, it->second, "raw"); }
         j.end_object();
     }
     j.end_array();
@@ -1205,7 +1246,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     j.key("economy");
     j.begin_object();
     for (const std::string& k : {"produces", "upkeep", "profits", "trade_value"}) {
-        if (const PdxValue* v = child(planet, k)) { j.key(k); write_pdx_as_json(j, v); }
+        if (const PdxValue* v = child(planet, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
     }
     j.end_object();
 
@@ -1217,19 +1258,19 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         if (qid.empty()) { j.value(nullptr); continue; }
         auto qit = ix.construction_queues.find(qid);
         j.begin_object();
-        j.key("queue_id"); j.value(qid);
+        j.key("queue_id"); write_id(j, qid);
         if (qit != ix.construction_queues.end()) {
-            j.key("queue"); write_pdx_as_json(j, qit->second);
+            j.key("queue"); write_pdx_as_schema_json(j, qit->second, "queue");
             j.key("items_resolved");
             j.begin_array();
             for (const std::string& item_id : scalar_id_list_from_child(qit->second, "items")) {
                 auto iit = ix.construction_items.find(item_id);
                 j.begin_object();
-                j.key("item_id"); j.value(item_id);
+                j.key("item_id"); write_id(j, item_id);
                 if (iit != ix.construction_items.end()) {
                     j.key("resolved"); j.value(true);
                     j.key("item");
-                    write_pdx_as_json(j, iit->second);
+                    write_pdx_as_schema_json(j, iit->second, "item");
                 } else {
                     j.key("resolved"); j.value(false);
                 }
@@ -1249,7 +1290,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         j.key("governor");
         auto git = ix.leaders.find(governor);
         if (git != ix.leaders.end()) write_resolved_leader(j, governor, git->second, st, ix, defs);
-        else { j.begin_object(); j.key("leader_id"); j.value(governor); j.key("resolved"); j.value(false); j.end_object(); }
+        else { j.begin_object(); j.key("leader_id"); write_id(j, governor); j.key("resolved"); j.value(false); j.end_object(); }
     }
 
     j.key("armies");
@@ -1258,14 +1299,14 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         auto it = ix.armies.find(aid);
         if (it != ix.armies.end() && is_defense_army(it->second)) continue;
         j.begin_object();
-        j.key("army_id"); j.value(aid);
+        j.key("army_id"); write_id(j, aid);
         if (it != ix.armies.end()) {
             j.key("name"); j.value(localized_name(child(it->second, "name")));
             std::string type = scalar_or(child(it->second, "type"));
             j.key("type"); j.value(type);
             if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
             for (const std::string& k : {"health", "max_health", "morale", "owner", "species", "planet", "spawning_planet"}) {
-                if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_json(j, v); }
+                if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
             }
             std::string sid = scalar_or(child(it->second, "species"));
             if (!sid.empty()) referenced_species.insert(sid);
@@ -1277,14 +1318,14 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     }
     j.end_array();
 
-    if (const PdxValue* mods = child(planet, "timed_modifier")) { j.key("timed_modifiers"); write_pdx_as_json(j, mods); }
-    if (const PdxValue* mods = child(planet, "planet_modifier")) { j.key("planet_modifiers"); write_pdx_as_json(j, mods); }
-    if (const PdxValue* flags = child(planet, "flags")) { j.key("flags"); write_pdx_as_json(j, flags); }
+    if (const PdxValue* mods = child(planet, "timed_modifier")) { j.key("timed_modifiers"); write_pdx_as_schema_json(j, mods, "timed_modifiers"); }
+    if (const PdxValue* mods = child(planet, "planet_modifier")) { j.key("planet_modifiers"); write_pdx_as_schema_json(j, mods, "planet_modifiers"); }
+    if (const PdxValue* flags = child(planet, "flags")) { j.key("flags"); write_pdx_as_schema_json(j, flags, "flags"); }
 
     write_colony_derived_summary(j, planet_id, planet, ix, colony_rollup, capital_id);
 
     if (st.include_source_locations) { j.key("source"); write_source(j, planet); }
-    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, planet); }
+    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, planet, "raw"); }
     j.end_object();
 }
 
@@ -1338,7 +1379,7 @@ bool is_dashboard_military_fleet(const PdxValue* fleet, const SaveIndexes& ix) {
 void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fleet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_leaders) {
     (void)defs;
     j.begin_object();
-    j.key("fleet_id"); j.value(fleet_id);
+    j.key("fleet_id"); write_id(j, fleet_id);
     j.key("name"); j.value(localized_name(child(fleet, "name")));
     json_optional_scalar(j, fleet, "owner");
     json_optional_scalar(j, fleet, "military_power");
@@ -1349,7 +1390,7 @@ void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fle
     json_optional_scalar(j, fleet, "station");
     json_optional_scalar(j, fleet, "orbital_station");
     json_optional_scalar(j, fleet, "civilian");
-    if (const PdxValue* coord = child(fleet, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
+    if (const PdxValue* coord = child(fleet, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
     const std::set<std::string> ship_classes = fleet_ship_classes(fleet, ix);
     j.key("ship_classes");
     j.begin_array();
@@ -1362,13 +1403,13 @@ void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fle
         j.key("commander");
         auto it = ix.leaders.find(admiral);
         if (it != ix.leaders.end()) write_resolved_leader(j, admiral, it->second, st, ix, defs);
-        else { j.begin_object(); j.key("leader_id"); j.value(admiral); j.key("resolved"); j.value(false); j.end_object(); }
+        else { j.begin_object(); j.key("leader_id"); write_id(j, admiral); j.key("resolved"); j.value(false); j.end_object(); }
     }
     if (const PdxValue* ships = child(fleet, "ships")) {
-        j.key("ships"); write_pdx_as_json(j, ships);
+        j.key("ships"); write_pdx_as_schema_json(j, ships, "ships");
     }
     if (st.include_source_locations) { j.key("source"); write_source(j, fleet); }
-    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, fleet); }
+    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, fleet, "raw"); }
     j.end_object();
 }
 
@@ -1426,6 +1467,33 @@ struct ArmyExportContext {
 
 ArmyExportContext build_army_export_context(const PdxValue* country, const SaveIndexes& ix);
 void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context);
+
+void write_capital_planet_stub(JsonWriter& j,
+                                      const std::string& capital_id,
+                                      const PdxValue* capital,
+                                      const MapExportContext& map_context,
+                                      const SaveIndexes& ix) {
+    if (capital_id.empty() || !capital) {
+        j.value(nullptr);
+        return;
+    }
+
+    const std::string system_id = !map_context.capital_system_id.empty()
+        ? map_context.capital_system_id
+        : scalar_or(child(child(capital, "coordinate"), "origin"));
+    std::string system_name = map_context.capital_system_name;
+    if (system_name.empty()) {
+        auto sys_it = ix.galactic_objects.find(system_id);
+        if (sys_it != ix.galactic_objects.end()) system_name = localized_name(child(sys_it->second, "name"));
+    }
+
+    j.begin_object();
+    j.key("planet_id"); write_id(j, capital_id);
+    j.key("name"); j.value(localized_name(child(capital, "name")));
+    j.key("system_id"); write_id(j, system_id);
+    j.key("system_name"); j.value(system_name);
+    j.end_object();
+}
 
 std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::path& out_path,
                                  const std::string& save_file_name,
@@ -1495,46 +1563,31 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.begin_object();
     j.key("file"); j.value(save_file_name);
     j.key("game_date"); j.value(game_date);
-    j.key("version"); write_pdx_as_json(j, child(ix.root, "version"));
-    j.key("save_name"); write_pdx_as_json(j, child(ix.root, "name"));
+    j.key("version"); write_pdx_as_schema_json(j, child(ix.root, "version"), "version");
+    j.key("save_name"); write_pdx_as_schema_json(j, child(ix.root, "name"), "save_name");
     j.end_object();
 
     j.key("country");
     j.begin_object();
-    j.key("country_id"); j.value(country_id);
+    j.key("country_id"); write_id(j, country_id);
     j.key("name"); j.value(summary.country_name);
     j.key("adjective"); j.value(localized_name(child(country, "adjective")));
     for (const std::string& k : {"type", "personality", "capital", "starting_system", "military_power", "economy_power", "tech_power", "victory_rank", "victory_score", "fleet_size", "used_naval_capacity", "empire_size", "num_sapient_pops", "employable_pops", "starbase_capacity", "num_upgraded_starbase", "graphical_culture", "city_graphical_culture", "room"}) {
-        if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); }
+        if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
     }
-    j.key("founder_species_ref"); j.value(founder);
-    j.key("built_species_ref"); j.value(built);
-    if (const PdxValue* flag = child(country, "flag")) { j.key("flag"); write_pdx_as_json(j, flag); }
-    if (const PdxValue* ethos = child(country, "ethos")) { j.key("ethics"); write_pdx_as_json(j, ethos); }
-    if (const PdxValue* gov = child(country, "government")) { j.key("government"); write_pdx_as_json(j, gov); }
-    if (const PdxValue* budget = child(country, "budget")) { j.key("budget"); write_pdx_as_json(j, budget); }
-    if (const PdxValue* policies = child(country, "active_policies")) { j.key("active_policies"); write_pdx_as_json(j, policies); }
-    if (const PdxValue* subjects = child(country, "subjects")) { j.key("subjects"); write_pdx_as_json(j, subjects); }
-    if (const PdxValue* trade = child(country, "trade_conversions")) { j.key("trade_conversions"); write_pdx_as_json(j, trade); }
+    j.key("founder_species_ref"); write_id(j, founder);
+    j.key("built_species_ref"); write_id(j, built);
+    if (const PdxValue* flag = child(country, "flag")) { j.key("flag"); write_pdx_as_schema_json(j, flag, "flag"); }
+    if (const PdxValue* ethos = child(country, "ethos")) { j.key("ethics"); write_pdx_as_schema_json(j, ethos, "ethics"); }
+    if (const PdxValue* gov = child(country, "government")) { j.key("government"); write_pdx_as_schema_json(j, gov, "government"); }
+    if (const PdxValue* policies = child(country, "active_policies")) { j.key("active_policies"); write_pdx_as_schema_json(j, policies, "active_policies"); }
+    if (const PdxValue* subjects = child(country, "subjects")) { j.key("subjects"); write_pdx_as_schema_json(j, subjects, "subjects"); }
+    if (const PdxValue* trade = child(country, "trade_conversions")) { j.key("trade_conversions"); write_pdx_as_schema_json(j, trade, "trade_conversions"); }
     if (st.include_source_locations) { j.key("source"); write_source(j, country); }
-    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, country); }
+    if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, country, "raw"); }
     j.end_object();
 
-    j.key("economy");
-    j.begin_object();
-    for (const std::string& k : {"economy_power", "tech_power", "empire_size", "victory_score", "victory_rank", "num_sapient_pops", "employable_pops"}) {
-        if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); }
-    }
-    if (const PdxValue* budget = child(country, "budget")) {
-        if (const PdxValue* balance = child(budget, "balance")) {
-            j.key("monthly_net_resources");
-            write_pdx_as_json(j, balance);
-        }
-    }
-    j.key("stored_resources");
-    if (stored_resources) write_pdx_as_json(j, stored_resources);
-    else { j.begin_object(); j.end_object(); }
-    j.end_object();
+    write_nat_finance_economy(j, country, stored_resources);
 
     j.key("capital_planet");
     std::vector<UnresolvedReference> unresolved_refs;
@@ -1546,10 +1599,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
         summary.capital_name = localized_name(child(capital_it->second, "name"));
-        const ColonyDemographicRollup* capital_rollup = nullptr;
-        auto cr_it = rollups.colonies.find(capital_id);
-        if (cr_it != rollups.colonies.end()) capital_rollup = &cr_it->second;
-        write_planet(j, capital_id, capital_it->second, ix, st, defs, capital_id, capital_rollup, referenced_species, referenced_leaders);
+        write_capital_planet_stub(j, capital_id, capital_it->second, map_context, ix);
     } else {
         if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
         j.value(nullptr);
@@ -1573,14 +1623,14 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
             add_unresolved("planet", pid, "country.owned_planets");
             colonies_missing_derived_summary.push_back(pid);
             colonies_missing_demographic_summary.push_back(pid);
-            j.begin_object(); j.key("planet_id"); j.value(pid); j.key("resolved"); j.value(false); j.end_object();
+            j.begin_object(); j.key("planet_id"); write_id(j, pid); j.key("resolved"); j.value(false); j.end_object();
         }
     }
     j.end_array();
 
     j.key("controlled_planet_ids");
     j.begin_array();
-    for (const std::string& pid : controlled_planets) j.value(pid);
+    for (const std::string& pid : controlled_planets) write_id(j, pid);
     j.end_array();
 
     write_demographics(j, rollups.demographics);
@@ -1588,16 +1638,12 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     write_systems_block(j, map_context, ix, st);
     write_map_summary(j, map_context);
 
-    j.key("stored_resources");
-    if (stored_resources) write_pdx_as_json(j, stored_resources);
-    else { j.begin_object(); j.end_object(); }
-
     j.key("fleets");
     j.begin_array();
     for (const std::string& fid : military_fleet_ids) {
         auto it = ix.fleets.find(fid);
         if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders);
-        else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); j.value(fid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); write_id(j, fid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_array();
 
@@ -1605,7 +1651,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.begin_array();
     for (const std::string& aid : army_context.unresolved_army_ids) {
         add_unresolved("army", aid, "country.owned_armies");
-        j.begin_object(); j.key("army_id"); j.value(aid); j.key("resolved"); j.value(false); j.end_object();
+        j.begin_object(); j.key("army_id"); write_id(j, aid); j.key("resolved"); j.value(false); j.end_object();
     }
     j.end_array();
     write_army_formations(j, army_context);
@@ -1616,7 +1662,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
         j.key(sid);
         auto it = ix.species.find(sid);
         if (it != ix.species.end()) write_resolved_species(j, sid, it->second, st, defs);
-        else { add_unresolved("species", sid, "country.species"); j.begin_object(); j.key("species_id"); j.value(sid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("species", sid, "country.species"); j.begin_object(); j.key("species_id"); write_id(j, sid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
 
@@ -1626,7 +1672,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
         j.key(lid);
         auto it = ix.leaders.find(lid);
         if (it != ix.leaders.end()) write_resolved_leader(j, lid, it->second, st, ix, defs);
-        else { add_unresolved("leader", lid, "country.leaders"); j.begin_object(); j.key("leader_id"); j.value(lid); j.key("resolved"); j.value(false); j.end_object(); }
+        else { add_unresolved("leader", lid, "country.leaders"); j.begin_object(); j.key("leader_id"); write_id(j, lid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
 
@@ -1634,10 +1680,10 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.begin_object();
     j.key("identity");
     j.begin_object();
-    j.key("country_id"); j.value(country_id);
+    j.key("country_id"); write_id(j, country_id);
     j.key("country_name"); j.value(summary.country_name);
     j.key("game_date"); j.value(game_date);
-    j.key("capital_planet_id"); j.value(capital_id);
+    j.key("capital_planet_id"); write_id(j, capital_id);
     j.key("capital_planet_name"); j.value(summary.capital_name);
     j.end_object();
     j.key("colonies");
@@ -1647,15 +1693,11 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.end_object();
     j.key("economy");
     j.begin_object();
-    for (const std::string& k : {"economy_power", "tech_power", "empire_size", "victory_score", "victory_rank", "num_sapient_pops", "employable_pops"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
-    if (const PdxValue* budget = child(country, "budget")) { if (const PdxValue* balance = child(budget, "balance")) { j.key("monthly_net_resources"); write_pdx_as_json(j, balance); } }
-    j.key("stored_resources");
-    if (stored_resources) write_pdx_as_json(j, stored_resources);
-    else { j.begin_object(); j.end_object(); }
+    for (const std::string& k : {"economy_power", "tech_power", "empire_size", "victory_score", "victory_rank", "num_sapient_pops", "employable_pops"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); } }
     j.end_object();
     j.key("military");
     j.begin_object();
-    for (const std::string& k : {"military_power", "fleet_size", "used_naval_capacity"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
+    for (const std::string& k : {"military_power", "fleet_size", "used_naval_capacity"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); } }
     j.key("fleet_count"); j.raw_number(std::to_string(military_fleet_ids.size()));
     j.key("army_count"); j.raw_number(std::to_string(army_context.non_defense_army_ids.size()));
     j.key("suppressed_non_military_fleet_count"); j.raw_number(std::to_string(suppressed_non_military_fleet_count));
@@ -1664,7 +1706,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.begin_object();
     j.key("system_count"); j.raw_number(std::to_string(map_context.systems.size()));
     j.key("colony_system_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
-    j.key("capital_system_id"); j.value(map_context.capital_system_id);
+    j.key("capital_system_id"); write_id(j, map_context.capital_system_id);
     j.key("capital_system_name"); j.value(map_context.capital_system_name);
     j.key("hyperlane_edge_count"); j.raw_number(std::to_string(map_context.hyperlane_edge_count));
     j.end_object();
@@ -1701,7 +1743,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.key("colonies_with_owner_mismatch"); j.begin_array(); j.end_array();
     j.key("colonies_missing_derived_summary");
     j.begin_array();
-    for (const std::string& pid : colonies_missing_derived_summary) j.value(pid);
+    for (const std::string& pid : colonies_missing_derived_summary) write_id(j, pid);
     j.end_array();
     j.key("demographics_species_count"); j.raw_number(std::to_string(rollups.demographics.species.size()));
     j.key("demographics_total_pops"); j.raw_number(json_number(rollups.demographics.total_sapient_pops));
@@ -1714,11 +1756,11 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     }
     j.key("colonies_missing_demographic_summary");
     j.begin_array();
-    for (const std::string& pid : colonies_missing_demographic_summary) j.value(pid);
+    for (const std::string& pid : colonies_missing_demographic_summary) write_id(j, pid);
     j.end_array();
     j.key("species_without_resolution");
     j.begin_array();
-    for (const std::string& sid : rollups.demographics.species_without_resolution) j.value(sid);
+    for (const std::string& sid : rollups.demographics.species_without_resolution) write_id(j, sid);
     j.end_array();
     j.key("inactive_job_records_suppressed"); j.raw_number(std::to_string(rollups.workforce.inactive_job_records_suppressed));
     j.key("non_military_fleet_records_suppressed"); j.raw_number(std::to_string(suppressed_non_military_fleet_count));
@@ -1730,10 +1772,10 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
 
     j.key("references");
     j.begin_object();
-    j.key("raw_country_id"); j.value(country_id);
-    j.key("raw_capital_planet_id"); j.value(capital_id);
-    j.key("referenced_species_ids"); j.begin_array(); for (const auto& sid : referenced_species) j.value(sid); j.end_array();
-    j.key("referenced_leader_ids"); j.begin_array(); for (const auto& lid : referenced_leaders) j.value(lid); j.end_array();
+    j.key("raw_country_id"); write_id(j, country_id);
+    j.key("raw_capital_planet_id"); write_id(j, capital_id);
+    j.key("referenced_species_ids"); write_id_array(j, referenced_species);
+    j.key("referenced_leader_ids"); write_id_array(j, referenced_leaders);
     j.end_object();
 
     j.key("warnings");
@@ -1859,8 +1901,8 @@ void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context)
     for (const ArmyFormation& f : army_context.formations) {
         j.begin_object();
         j.key("formation_name"); j.value(f.formation_name);
-        j.key("owner"); j.value(f.owner);
-        j.key("planet"); j.value(f.planet);
+        j.key("owner"); write_id(j, f.owner);
+        j.key("planet"); write_id(j, f.planet);
         j.key("army_count"); j.raw_number(std::to_string(f.army_ids.size()));
         j.key("composition_by_type"); write_count_object(j, f.composition_by_type);
         j.key("composition_by_species"); write_count_object(j, f.composition_by_species);
@@ -1874,7 +1916,7 @@ void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context)
         }
         j.key("army_ids");
         j.begin_array();
-        for (const std::string& aid : f.army_ids) j.value(aid);
+        for (const std::string& aid : f.army_ids) write_id(j, aid);
         j.end_array();
         j.end_object();
     }

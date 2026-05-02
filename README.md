@@ -15,9 +15,9 @@ This version is aimed at the first practical milestone:
 - Parse Paradox `key=value` / nested-brace syntax into a generic AST.
 - Build lookup indexes for countries, planets, species, leaders, buildings, districts, zones, deposits, pop groups, pop jobs, fleets, armies, systems, sectors, and construction queues.
 - Select nations according to `settings.config`.
-- Emit one JSON file per selected nation under `output/<game-date>/`.
+- Emit one JSON file per selected nation under `output/<game-date>/`, with filenames ending in `_YYYY-MM-DD.json`.
 - Resolve planet-owned IDs into self-contained structures where practical.
-- Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleets, grouped non-defense army formations, and current stored resources.
+- Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleets, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
 ## Build requirements
@@ -72,6 +72,8 @@ CLI overrides are available for development:
 
 Timeline export preserves existing timeline files during a single-save targeted run if timeline files already exist. This avoids replacing a full multi-save timeline with one snapshot; perfect timeline merging is left for a later milestone.
 
+Per-country timeline snapshots store `output_json_path` values pointing at the dated per-country filenames, for example `output/2220.12.16/0-(Tetra)_2220-12-16.json`.
+
 ### Debug performance timings
 
 `[debug] print_performance_timings=true` prints per-save and total parser-internal timings. If the setting is omitted, it defaults to `false`.
@@ -97,7 +99,11 @@ Top-level `fleets` now contains military fleets only. Starbases, mining/research
 
 Defense armies are not part of the export contract and are filtered before top-level, colony/local, formation, debug, or raw output paths. Suppressed defense armies only increment `validation.defense_armies_suppressed`. Non-defense armies are grouped under `army_formations` by `fleet_name` when present, otherwise by planet and army type.
 
-Country stockpiles are exposed prominently at top-level `economy.stored_resources`, alongside country economy/statistical fields such as `economy_power`, `tech_power`, `empire_size`, victory metrics, and pop metrics. The legacy top-level `stored_resources` field may remain as a compatibility duplicate, but `economy.stored_resources` is the preferred dashboard location.
+Country finance data is exposed only under top-level `nat_finance_economy`. Its `budget` uses the current-month income, expenses, and balance breakdown; `net_monthly_resource` is derived by summing current-month balance categories by resource; and `stored_resources` is the only stockpile location. The old top-level `economy`, top-level `stored_resources`, `country.budget`, and `derived_summary.economy.stored_resources` locations are not emitted.
+
+`capital_planet` is a navigation stub with `planet_id`, `name`, `system_id`, and `system_name`; the full capital colony record lives in `colonies[]`. Colonies no longer embed a top-level `system` object; use `derived_summary.system_id` or `derived_summary.map.system_id` to join to top-level `systems`.
+
+JSON ID/reference values are strings throughout the dashboard schema. Object keys under top-level `systems`, `species`, and `leaders` are ID keys. `coordinate.origin` is the explicit exception and remains numeric because it belongs to coordinate data and may use the `4294967295` sentinel.
 
 ## Notes on game definitions
 

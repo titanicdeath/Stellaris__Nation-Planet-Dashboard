@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 std::string cname = get_country_name(it->second);
-                fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ").json");
+                fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ")_" + output_date_suffix(game_date) + ".json");
                 const auto country_export_start = std::chrono::steady_clock::now();
                 auto result = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
                 const double country_export_seconds = elapsed_seconds_since(country_export_start);

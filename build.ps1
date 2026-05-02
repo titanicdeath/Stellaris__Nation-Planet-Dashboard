@@ -204,6 +204,172 @@ function Get-JsonItemCount {
     return 1
 }
 
+function Test-JsonScalarIdString {
+    param(
+        [object]$Value,
+        [string]$Path
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    if ($Value -is [string]) {
+        return
+    }
+
+    throw "$Path must be a JSON string ID/reference, but was $($Value.GetType().Name)"
+}
+
+function Test-JsonIdStringArray {
+    param(
+        [object]$Value,
+        [string]$Path
+    )
+
+    foreach ($item in @($Value)) {
+        Test-JsonScalarIdString $item $Path
+    }
+}
+
+function Test-JsonIdKeyedMap {
+    param(
+        [object]$Value,
+        [string]$Path
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    if ($Value -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path must be a JSON object/map keyed by ID"
+    }
+}
+
+function Test-IsJsonCountOrStatPath {
+    param(
+        [string]$Name,
+        [string]$Path
+    )
+
+    if ($Path -like '$.debug.index_counts.*' -or $Path -like '*.index_counts.*') {
+        return $true
+    }
+
+    if ($Name -match '_count$' -or $Name -match '_counts$') {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-IsSpeciesReferencePath {
+    param([string]$Path)
+
+    # `species_id` is handled by the generic *_id rule. Plain `species` is
+    # only an ID reference in known entity-reference locations; elsewhere it
+    # may be a count/category label such as $.debug.index_counts.species.
+    return (
+        $Path -match '\.pop_groups\[\d+\]\.key\.species$' -or
+        $Path -match '\.armies\[\d+\]\.species$' -or
+        $Path -match '\.leaders\.[^.]+\.species$' -or
+        $Path -match '\.(leader|commander|governor)\.species$'
+    )
+}
+
+function Test-JsonIdReferenceShape {
+    param(
+        [string]$Name,
+        [object]$Value,
+        [string]$Path
+    )
+
+    if ($Path -eq '$.coordinate.origin' -or $Path -like '*.coordinate.origin') {
+        return
+    }
+
+    if (Test-IsJsonCountOrStatPath $Name $Path) {
+        return
+    }
+
+    # *_by_id fields are maps keyed by ID. JSON object keys are already strings;
+    # the map values are facts such as counts or nested objects, not ID scalars.
+    if ($Name -match '_by_id$') {
+        Test-JsonIdKeyedMap $Value $Path
+        return
+    }
+
+    # composition_by_species is keyed by species ID, with numeric counts as values.
+    if ($Name -eq "composition_by_species") {
+        Test-JsonIdKeyedMap $Value $Path
+        return
+    }
+
+    # *_ids fields are arrays of ID strings.
+    if ($Name -match '_ids$') {
+        if ($null -ne $Value -and $Value -isnot [System.Array]) {
+            throw "$Path must be an array of JSON string IDs"
+        }
+        Test-JsonIdStringArray $Value $Path
+        return
+    }
+
+    # *_id fields are scalar ID strings.
+    if ($Name -match '_id$') {
+        Test-JsonScalarIdString $Value $Path
+        return
+    }
+
+    if ($Name -eq "species") {
+        if (Test-IsSpeciesReferencePath $Path) {
+            Test-JsonScalarIdString $Value $Path
+        }
+        return
+    }
+
+    $knownReferenceFields = @(
+        "owner",
+        "controller",
+        "original_owner",
+        "capital",
+        "starting_system",
+        "home_planet",
+        "country",
+        "heir",
+        "council_positions",
+        "subjects",
+        "planet",
+        "spawning_planet",
+        "pop_faction",
+        "sector"
+    )
+
+    if ($knownReferenceFields -notcontains $Name) {
+        return
+    }
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    if ($Value -is [System.Array]) {
+        foreach ($item in @($Value)) {
+            if ($item -is [System.Management.Automation.PSCustomObject]) {
+                return
+            }
+        }
+        Test-JsonIdStringArray $Value $Path
+        return
+    }
+
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        return
+    }
+
+    Test-JsonScalarIdString $Value $Path
+}
+
 function Get-AssignedPopGroupAmount {
     param([object]$Job)
 
@@ -308,6 +474,8 @@ function Test-CountryJsonTree {
             throw "$childPath uses banned raw_owned_armies"
         }
 
+        Test-JsonIdReferenceShape $property.Name $property.Value $childPath
+
         if ($property.Name -eq "jobs") {
             foreach ($job in @($property.Value)) {
                 Test-ExportableJobObject $job $childPath
@@ -391,16 +559,24 @@ function Test-GeneratedJson {
 
         Test-CountryJsonTree $json '$'
 
+        if ($file.Name -notmatch '_\d{4}-\d{2}-\d{2}\.json$') {
+            throw "$($file.FullName) must include a _YYYY-MM-DD suffix before .json"
+        }
+
+        $storedResourceLiteralCount = ([regex]::Matches($rawCountryJson, '"stored_resources"\s*:')).Count
+        if ($storedResourceLiteralCount -ne 1) {
+            throw "$($file.FullName) must contain literal `"stored_resources`": exactly once; found $storedResourceLiteralCount"
+        }
+
         foreach ($requiredTopLevel in @(
             "country",
-            "economy",
+            "nat_finance_economy",
             "colonies",
             "derived_summary",
             "validation",
             "demographics",
             "workforce_summary",
             "systems",
-            "stored_resources",
             "army_formations"
         )) {
             if (-not (Has-JsonProperty $json $requiredTopLevel)) {
@@ -408,12 +584,44 @@ function Test-GeneratedJson {
             }
         }
 
-        if (-not (Has-JsonProperty $json "map_summary") -and -not (Has-JsonProperty $json.derived_summary "map")) {
-            throw "$($file.FullName) is missing map_summary or derived_summary.map"
+        if (Has-JsonProperty $json "stored_resources") {
+            throw "$($file.FullName) still exposes top-level stored_resources"
         }
 
-        if (-not (Has-JsonProperty $json.economy "stored_resources")) {
-            throw "$($file.FullName) is missing economy.stored_resources"
+        if (Has-JsonProperty $json "economy") {
+            throw "$($file.FullName) still exposes top-level economy"
+        }
+
+        if (Has-JsonProperty $json.country "budget") {
+            throw "$($file.FullName) still exposes country.budget"
+        }
+
+        if ((Has-JsonProperty $json.derived_summary "economy") -and
+            (Has-JsonProperty $json.derived_summary.economy "stored_resources")) {
+            throw "$($file.FullName) still exposes derived_summary.economy.stored_resources"
+        }
+
+        foreach ($requiredFinanceField in @(
+            "budget",
+            "net_monthly_resource",
+            "stored_resources"
+        )) {
+            if (-not (Has-JsonProperty $json.nat_finance_economy $requiredFinanceField)) {
+                throw "$($file.FullName) is missing nat_finance_economy.$requiredFinanceField"
+            }
+        }
+
+        if ((Has-JsonProperty $json "capital_planet") -and $null -ne $json.capital_planet) {
+            $allowedCapitalKeys = @("planet_id", "name", "system_id", "system_name")
+            foreach ($capitalKey in $json.capital_planet.PSObject.Properties.Name) {
+                if ($allowedCapitalKeys -notcontains $capitalKey) {
+                    throw "$($file.FullName) capital_planet contains disallowed key: $capitalKey"
+                }
+            }
+        }
+
+        if (-not (Has-JsonProperty $json "map_summary") -and -not (Has-JsonProperty $json.derived_summary "map")) {
+            throw "$($file.FullName) is missing map_summary or derived_summary.map"
         }
 
         $colonies = @($json.colonies)
@@ -428,6 +636,10 @@ function Test-GeneratedJson {
             }
 
             $planetId = if (Has-JsonProperty $colony "planet_id") { $colony.planet_id } else { "<unknown>" }
+
+            if (Has-JsonProperty $colony "system") {
+                throw "$($file.FullName) colony $planetId still contains top-level system"
+            }
 
             if (-not (Has-JsonProperty $colony "derived_summary")) {
                 throw "$($file.FullName) colony $planetId is missing derived_summary"

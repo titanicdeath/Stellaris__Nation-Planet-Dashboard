@@ -147,3 +147,115 @@ void write_pdx_as_json(JsonWriter& j, const PdxValue* v, int max_depth) {
     j.end_object();
 }
 
+bool ends_with(const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool is_json_id_reference_field(const std::string& key) {
+    static const std::unordered_set<std::string> known = {
+        "owner",
+        "controller",
+        "original_owner",
+        "capital",
+        "starting_system",
+        "home_planet",
+        "species",
+        "country",
+        "heir",
+        "council_positions",
+        "subjects",
+        "planet",
+        "spawning_planet",
+        "pop_faction",
+        "sector",
+        "ships",
+        "starbases",
+        "to",
+        "pop_group",
+        "leader",
+        "ruler",
+        "governor",
+    };
+    return ends_with(key, "_id") || ends_with(key, "_ids") || known.count(key) != 0;
+}
+
+std::string id_to_json_string(const PdxValue* v) {
+    return scalar_or(v);
+}
+
+void write_id(JsonWriter& j, const std::string& id) {
+    j.value(id);
+}
+
+void write_id(JsonWriter& j, const PdxValue* v) {
+    j.value(id_to_json_string(v));
+}
+
+void write_id_array(JsonWriter& j, const std::vector<std::string>& ids) {
+    j.begin_array();
+    for (const std::string& id : ids) write_id(j, id);
+    j.end_array();
+}
+
+void write_id_array(JsonWriter& j, const std::set<std::string>& ids) {
+    j.begin_array();
+    for (const std::string& id : ids) write_id(j, id);
+    j.end_array();
+}
+
+bool should_stringify_schema_scalar(const std::string& current_key, const std::string& parent_key) {
+    if (parent_key == "coordinate" && current_key == "origin") return false;
+    if (current_key == "id" && parent_key == "location") return true;
+    return is_json_id_reference_field(current_key);
+}
+
+void write_pdx_as_schema_json(JsonWriter& j, const PdxValue* v, const std::string& current_key, const std::string& parent_key, int max_depth) {
+    if (!v) { j.value(nullptr); return; }
+    if (max_depth <= 0) { j.value("<max_depth_reached>"); return; }
+    if (v->kind == PdxValue::Kind::Scalar) {
+        if (should_stringify_schema_scalar(current_key, parent_key)) j.value(v->scalar);
+        else json_scalar(j, v->scalar);
+        return;
+    }
+
+    bool has_keys = false;
+    bool has_anon = false;
+    std::map<std::string, int> counts;
+    for (const auto& e : v->entries) {
+        if (e.key.empty()) has_anon = true;
+        else { has_keys = true; counts[e.key]++; }
+    }
+    if (!has_keys) {
+        j.begin_array();
+        for (const auto& e : v->entries) write_pdx_as_schema_json(j, e.value, current_key, parent_key, max_depth - 1);
+        j.end_array();
+        return;
+    }
+
+    j.begin_object();
+    if (has_anon) {
+        j.key("_values");
+        j.begin_array();
+        for (const auto& e : v->entries) {
+            if (e.key.empty()) write_pdx_as_schema_json(j, e.value, current_key, parent_key, max_depth - 1);
+        }
+        j.end_array();
+    }
+    std::unordered_set<std::string> emitted;
+    for (const auto& e : v->entries) {
+        if (e.key.empty() || emitted.count(e.key)) continue;
+        emitted.insert(e.key);
+        j.key(e.key);
+        if (counts[e.key] == 1) {
+            write_pdx_as_schema_json(j, e.value, e.key, current_key, max_depth - 1);
+        } else {
+            j.begin_array();
+            for (const auto& d : v->entries) {
+                if (d.key == e.key) write_pdx_as_schema_json(j, d.value, e.key, current_key, max_depth - 1);
+            }
+            j.end_array();
+        }
+    }
+    j.end_object();
+}
+
