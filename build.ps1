@@ -204,6 +204,120 @@ function Get-JsonItemCount {
     return 1
 }
 
+function Get-AssignedPopGroupAmount {
+    param([object]$Job)
+
+    if (-not (Has-JsonProperty $Job "pop_groups")) {
+        return 0.0
+    }
+
+    $total = 0.0
+    foreach ($group in @($Job.pop_groups)) {
+        if ((Has-JsonProperty $group "pop_group") -and [string]$group.pop_group -ne "4294967295" -and (Has-JsonProperty $group "amount")) {
+            $total += [double]$group.amount
+        }
+    }
+    return $total
+}
+
+function Test-ExportableJobObject {
+    param(
+        [object]$Job,
+        [string]$Path
+    )
+
+    $sentinelTypes = @(
+        "crisis_purge",
+        "bio_trophy_processing",
+        "bio_trophy_unemployment",
+        "bio_trophy_unprocessing",
+        "neural_chip",
+        "neural_chip_processing",
+        "neural_chip_unprocessing",
+        "purge_unprocessing",
+        "slave_processing",
+        "slave_unprocessing",
+        "presapient_unprocessing",
+        "event_purge"
+    )
+
+    if (-not (Has-JsonProperty $Job "type") -or [string]::IsNullOrWhiteSpace([string]$Job.type)) {
+        throw "$Path contains a job without an exportable type"
+    }
+
+    $type = [string]$Job.type
+    $assignedAmount = Get-AssignedPopGroupAmount $Job
+    $workforce = if (Has-JsonProperty $Job "workforce") { [double]$Job.workforce } else { 0.0 }
+
+    $allSentinelWorkforce =
+        (Has-JsonProperty $Job "workforce") -and ([double]$Job.workforce -eq -1.0) -and
+        (Has-JsonProperty $Job "max_workforce") -and ([double]$Job.max_workforce -eq -1.0) -and
+        (Has-JsonProperty $Job "automated_workforce") -and ([double]$Job.automated_workforce -eq -1.0) -and
+        (Has-JsonProperty $Job "workforce_limit") -and ([double]$Job.workforce_limit -eq -1.0)
+
+    if ($allSentinelWorkforce) {
+        throw "$Path contains a sentinel job record of type $type"
+    }
+
+    if ((Has-JsonProperty $Job "pop_group") -and [string]$Job.pop_group -eq "4294967295" -and $assignedAmount -le 0.0) {
+        throw "$Path contains unresolved pop_group sentinel for job type $type"
+    }
+
+    if ($workforce -le 0.0 -and $assignedAmount -le 0.0) {
+        throw "$Path contains non-exportable job type $type with no workforce or assigned pops"
+    }
+
+    if ($sentinelTypes -contains $type -and $assignedAmount -le 0.0) {
+        throw "$Path contains suppressed sentinel job type $type"
+    }
+}
+
+function Test-CountryJsonTree {
+    param(
+        [object]$Value,
+        [string]$Path
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    if ($Value -is [System.Array]) {
+        for ($i = 0; $i -lt $Value.Count; $i++) {
+            Test-CountryJsonTree $Value[$i] "$Path[$i]"
+        }
+        return
+    }
+
+    if ($Value -isnot [System.Management.Automation.PSCustomObject]) {
+        return
+    }
+
+    if ((Has-JsonProperty $Value "type") -and [string]$Value.type -eq "defense_army") {
+        throw "$Path contains banned defense_army object"
+    }
+
+    foreach ($property in $Value.PSObject.Properties) {
+        $childPath = "$Path.$($property.Name)"
+
+        if ($property.Name -like "inactive_job_*" -and $childPath -ne '$.validation.inactive_job_records_suppressed') {
+            throw "$childPath uses a banned inactive job field name"
+        }
+
+        if ($property.Name -eq "raw_owned_armies") {
+            throw "$childPath uses banned raw_owned_armies"
+        }
+
+        if ($property.Name -eq "jobs") {
+            foreach ($job in @($property.Value)) {
+                Test-ExportableJobObject $job $childPath
+            }
+        }
+
+        Test-CountryJsonTree $property.Value $childPath
+    }
+}
+
 function Test-GeneratedJson {
     $OutputDir = Join-Path $Root "output"
 
@@ -242,15 +356,44 @@ function Test-GeneratedJson {
     }
 
     foreach ($file in $countryFiles) {
-        $json = Get-Content $file.FullName -Raw | ConvertFrom-Json
+        $rawCountryJson = Get-Content $file.FullName -Raw
+        $json = $rawCountryJson | ConvertFrom-Json
 
         if ($json.schema_version -ne "dashboard-country-v0.1") {
             Write-Host "SKIP $($file.FullName) - unknown schema_version: $($json.schema_version)"
             continue
         }
 
+        foreach ($bannedTerm in @(
+            "crisis_purge",
+            "bio_trophy_processing",
+            "bio_trophy_unemployment",
+            "bio_trophy_unprocessing",
+            "neural_chip",
+            "neural_chip_processing",
+            "neural_chip_unprocessing",
+            "purge_unprocessing",
+            "slave_processing",
+            "slave_unprocessing",
+            "presapient_unprocessing",
+            "event_purge",
+            "defense_army",
+            "raw_owned_armies",
+            "inactive_jobs_by_planet",
+            "inactive_job_types_suppressed",
+            "inactive_job_record_counts_by_type",
+            "inactive_job_record_count"
+        )) {
+            if ($rawCountryJson.Contains($bannedTerm)) {
+                throw "BANNED TERM FOUND: $bannedTerm in $($file.FullName)"
+            }
+        }
+
+        Test-CountryJsonTree $json '$'
+
         foreach ($requiredTopLevel in @(
             "country",
+            "economy",
             "colonies",
             "derived_summary",
             "validation",
@@ -267,6 +410,10 @@ function Test-GeneratedJson {
 
         if (-not (Has-JsonProperty $json "map_summary") -and -not (Has-JsonProperty $json.derived_summary "map")) {
             throw "$($file.FullName) is missing map_summary or derived_summary.map"
+        }
+
+        if (-not (Has-JsonProperty $json.economy "stored_resources")) {
+            throw "$($file.FullName) is missing economy.stored_resources"
         }
 
         $colonies = @($json.colonies)
@@ -301,8 +448,6 @@ function Test-GeneratedJson {
                 "pop_category_counts",
                 "job_counts_by_type",
                 "active_job_counts_by_type",
-                "inactive_job_record_count",
-                "inactive_job_types_suppressed",
                 "workforce_by_job_type",
                 "species_counts_by_name"
             )) {
@@ -335,10 +480,6 @@ function Test-GeneratedJson {
 
         if (-not (Has-JsonProperty $json.workforce_summary "active_job_counts_by_type")) {
             throw "$($file.FullName) is missing workforce_summary.active_job_counts_by_type"
-        }
-
-        if (-not (Has-JsonProperty $json.workforce_summary "inactive_job_record_counts_by_type")) {
-            throw "$($file.FullName) is missing workforce_summary.inactive_job_record_counts_by_type"
         }
 
         if (-not (Has-JsonProperty $json.workforce_summary "active_jobs_by_planet")) {

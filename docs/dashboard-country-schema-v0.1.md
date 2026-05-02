@@ -8,13 +8,14 @@ This document describes the practical JSON contract emitted by the parser for on
 - `parser_version`: Parser build/version string.
 - `save`: Save metadata (`file`, `game_date`, version/name when available).
 - `country`: Selected country data and metrics.
+- `economy`: Prominent country-level economy summary; this is the preferred dashboard location for `stored_resources`.
 - `capital_planet`: Expanded planet object for `country.capital`, or `null`.
 - `colonies`: Expanded array of owned planets (`country.owned_planets`).
 - `controlled_planet_ids`: Raw controlled planet IDs.
 - `systems`: Selected-country relevant star system context, keyed by system ID.
 - `map_summary`: Compact map/export summary for the selected-country system subset.
 - `fleets`: Fleet summaries owned by the country.
-- `owned_armies`: Legacy/debug-safe top-level army list. Defense armies are suppressed; grouped field armies are represented by `army_formations`.
+- `owned_armies`: Top-level non-defense army placeholders/legacy list. Defense armies are not part of the export contract.
 - `army_formations`: Grouped non-defense army formation summaries.
 - `stored_resources`: Current stockpiled resources from the country standard economy module resources path.
 - `species`: Referenced species objects, keyed by species ID.
@@ -44,6 +45,22 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - `founder_species_ref`, `built_species_ref`
 - optional blocks (`flag`, `ethics`, `government`, `budget`, etc.)
 
+## `economy`
+
+`economy` is a top-level country summary block intended for dashboard display. It appears near `country` and includes major country-level statistical and economic fields when present:
+
+- `economy_power`
+- `tech_power`
+- `empire_size`
+- `victory_score`
+- `victory_rank`
+- `num_sapient_pops`
+- `employable_pops`
+- `monthly_net_resources`
+- `stored_resources`
+
+`economy.stored_resources` is the prominent stockpile location and preferred source for dashboard display. The legacy top-level `stored_resources` field may also be emitted for compatibility, but deeply nested paths are not the primary display location.
+
 ## `capital_planet` and `colonies`
 
 `capital_planet` and each object in `colonies` include:
@@ -53,7 +70,7 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - building/district/deposit/pop summaries
 - `derived_summary` for dashboard-ready colony facts and card display
 - optional governor details
-- optional local source/raw sections (depending on config)
+- optional local source sections (depending on config)
 
 If a referenced planet cannot be resolved, a placeholder object with `resolved=false` is emitted and an unresolved warning entry is added.
 
@@ -149,29 +166,20 @@ Current fields:
 
 - `job_counts_by_type`: Count of active/dashboard-relevant job records by exact save job `type`. This is intentionally filtered.
 - `active_job_counts_by_type`: Explicit alias for the filtered active job counts.
-- `inactive_job_record_counts_by_type`: Suppressed inactive/sentinel job records by exact save job `type`.
 - `workforce_by_job_type`: Sum of non-negative `workforce` values by exact save job `type`.
 - `pop_category_counts`: Sum of pop group `size` by exact `pop_groups[].key.category` strings.
 - `pop_category_share`: Category share computed from `pop_category_counts`.
 - `jobs_by_planet`: Per-planet active job counts by exact job `type`. This is intentionally filtered.
 - `active_jobs_by_planet`: Explicit alias for filtered per-planet active job counts.
-- `inactive_jobs_by_planet`: Per-planet suppressed inactive/sentinel job records by exact job `type`.
 - `pop_categories_by_planet`: Per-planet pop group sizes by exact category.
 
-Job records are suppressed from active job counts when any of `workforce`, `max_workforce`, `automated_workforce`, or `workforce_limit` is `-1`, or when `pop_group`/`pop_groups` contains the unresolved sentinel `4294967295`. This removes phantom records such as purge and processing sentinels from dashboard job summaries. `workforce_by_job_type` remains a separate workforce rollup and still sums non-negative `workforce` values. The parser does not invent strata; it uses the category strings present in the save, such as `ruler`, `specialist`, `worker`, `slave`, or `civilian`.
-
-Each colony `derived_summary` mirrors the active job semantics and adds:
-
-- `active_job_counts_by_type`
-- `inactive_job_record_count`
-- `inactive_job_record_counts_by_type`
-- `inactive_job_types_suppressed`
+Inactive/sentinel jobs are not part of the export contract. Their records and names are not emitted in detailed colony jobs, active job maps, derived summaries, workforce summaries, debug sections, or raw escape hatches. Suppressed jobs only affect `validation.inactive_job_records_suppressed`, a numeric total. Exportable jobs must have a type plus meaningful workforce or positive assigned pop group amounts. Legitimate `civilian` jobs are allowed when they are real occupied jobs.
 
 ## `fleets` and `owned_armies`
 
 `fleets` contains military fleets only. Fleet-like records are suppressed when they are marked `station=yes`, `orbital_station=yes`, or `civilian=yes`, when their direct or resolved ship class is `shipclass_starbase`, `shipclass_mining_station`, `shipclass_research_station`, `shipclass_science_ship`, or `shipclass_constructor`, or when they have zero military power and no clear military fleet markers. Starbase and system context remains available under `systems` and map summaries.
 
-`owned_armies` no longer exposes planet defense armies as top-level expeditionary forces. Individual raw army records are available only in debug/raw output. Dashboard consumers should use `army_formations`.
+Defense armies are not part of the country JSON export contract. They are filtered before top-level army output, colony/local army lists, formations, and debug sections. Suppressed defense armies only affect `validation.defense_armies_suppressed`, a numeric total. Dashboard consumers should use `army_formations` for non-defense armies.
 
 `army_formations` groups non-defense armies by `fleet_name` when present, otherwise by planet and army type. Each formation includes:
 
@@ -191,7 +199,7 @@ Each colony `derived_summary` mirrors the active job semantics and adds:
 
 ## `stored_resources`
 
-`stored_resources` is the top-level source of truth for current country stockpiles. It is copied from `country.standard_economy_module.resources`, or from the live-save module path `country.modules.standard_economy_module.resources`, and may include resources such as energy, minerals, food, research, influence, unity, trade value, consumer goods, alloys, strategic resources, and minor artifacts when present in the save. `derived_summary.economy.stored_resources` repeats the same compact object for dashboard convenience.
+`economy.stored_resources` is the preferred source of truth for current country stockpiles. It is copied from `country.standard_economy_module.resources`, or from the live-save module path `country.modules.standard_economy_module.resources`, and may include resources such as energy, minerals, food, research, influence, unity, trade value, consumer goods, alloys, strategic resources, and minor artifacts when present in the save. The top-level `stored_resources` field may remain as a compatibility duplicate.
 
 ## `references`
 
@@ -234,12 +242,12 @@ Current top-level validation fields include:
 - `demographics_matches_country_pop_count`: compares the aggregated demographics total against `country.num_sapient_pops` when available, allowing a tolerance of the larger of 1 pop or 0.1% of the country value.
 - `colonies_missing_demographic_summary`: colony IDs that did not receive the compact demographic/workforce summary; normally empty for resolved colonies.
 - `species_without_resolution`: species IDs present in colony census data but missing from `species_db`.
-- `inactive_job_records_suppressed`: Total inactive/sentinel pop job records excluded from active job summaries.
+- `inactive_job_records_suppressed`: Numeric total of inactive/sentinel pop job records filtered before export.
 - `non_military_fleet_records_suppressed`: Owned fleet-like records excluded from top-level military `fleets`.
-- `defense_armies_suppressed`: Defense armies excluded from top-level expeditionary army output and `army_formations`.
+- `defense_armies_suppressed`: Numeric total of defense armies filtered before export.
 - `army_formations_count`: Number of grouped non-defense army formations exported.
-- `has_stored_resources`: Whether `stored_resources` contains at least one named resource.
-- `stored_resource_count`: Number of named entries under `stored_resources`.
+- `has_stored_resources`: Whether `economy.stored_resources` contains at least one named resource.
+- `stored_resource_count`: Number of named entries under `economy.stored_resources`.
 
 
 ## New in Milestone 3
@@ -251,10 +259,10 @@ Current top-level validation fields include:
 
 ## New in Milestone 3C
 
-- Filtered phantom/sentinel pop job records out of active dashboard job summaries and added inactive job diagnostics.
+- Made inactive/sentinel pop job records non-exportable; only numeric suppression totals remain.
 - Changed top-level `fleets` to military fleets only, with suppressed non-military fleet counts in validation.
-- Suppressed `defense_army` records from expeditionary army output and added grouped `army_formations`.
-- Added top-level `stored_resources` from the country standard economy module resources path.
+- Made defense army records non-exportable and added grouped `army_formations` for non-defense armies.
+- Added top-level `economy.stored_resources` from the country standard economy module resources path.
 
 ## New in Milestone 3B-1
 
