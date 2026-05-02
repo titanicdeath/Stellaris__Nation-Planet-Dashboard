@@ -740,6 +740,8 @@ static std::string scalar_or(const PdxValue* v, const std::string& fallback = ""
     return s ? *s : fallback;
 }
 
+static std::optional<double> scalar_double(const PdxValue* v);
+
 static std::string localized_name(const PdxValue* v) {
     if (!v) return "";
     if (v->kind == PdxValue::Kind::Scalar) return v->scalar;
@@ -1194,6 +1196,58 @@ static std::vector<std::string> scalar_id_list_from_child(const PdxValue* obj, c
     return primitive_list(child(obj, key));
 }
 
+static bool pdx_truthy(const PdxValue* v) {
+    const std::string s = lower_copy(scalar_or(v));
+    return s == "yes" || s == "true" || s == "1";
+}
+
+static bool scalar_is_exact_number(const PdxValue* v, double expected) {
+    auto d = scalar_double(v);
+    return d && *d == expected;
+}
+
+static bool has_concrete_pop_group_assignment(const PdxValue* job) {
+    const PdxValue* groups = child(job, "pop_groups");
+    if (!groups) return false;
+    const std::string direct = scalar_or(groups);
+    if (!direct.empty() && direct != "4294967295") return true;
+    for (const std::string& id : primitive_list(groups)) {
+        if (id != "4294967295") return true;
+    }
+    if (groups->kind == PdxValue::Kind::Container) {
+        for (const auto& e : groups->entries) {
+            if (e.value && e.value->kind == PdxValue::Kind::Container) {
+                const std::string nested = scalar_or(child(e.value, "pop_group"));
+                if (!nested.empty() && nested != "4294967295") return true;
+            } else if (e.value && e.value->kind == PdxValue::Kind::Scalar && e.value->scalar != "4294967295") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool has_unresolved_only_pop_group(const PdxValue* job) {
+    if (has_concrete_pop_group_assignment(job)) return false;
+    if (scalar_or(child(job, "pop_group")) == "4294967295") return true;
+    if (const PdxValue* groups = child(job, "pop_groups")) {
+        if (scalar_or(groups) == "4294967295") return true;
+        for (const std::string& id : primitive_list(groups)) {
+            if (id == "4294967295") return true;
+        }
+    }
+    return false;
+}
+
+static bool is_dashboard_active_pop_job(const PdxValue* job) {
+    if (!job) return false;
+    for (const std::string& k : {"workforce", "max_workforce", "automated_workforce", "workforce_limit"}) {
+        if (scalar_is_exact_number(child(job, k), -1.0)) return false;
+    }
+    if (has_unresolved_only_pop_group(job)) return false;
+    return true;
+}
+
 static void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue* sp, const Settings& st, const DefinitionIndex* defs) {
     j.begin_object();
     j.key("species_id"); j.value(id);
@@ -1637,6 +1691,15 @@ static double count_type_matches(const std::map<std::string, size_t>& counts, co
     return total;
 }
 
+static size_t direct_named_child_count(const PdxValue* v) {
+    if (!v || v->kind != PdxValue::Kind::Container) return 0;
+    size_t count = 0;
+    for (const auto& e : v->entries) {
+        if (!e.key.empty()) count++;
+    }
+    return count;
+}
+
 static std::string infer_colony_role(const std::string& planet_id,
                                      const PdxValue* planet,
                                      const std::string& capital_id,
@@ -1720,10 +1783,13 @@ static std::optional<double> numeric_child_or_scalar(const PdxValue* v, const st
 struct ColonyDemographicRollup {
     std::map<std::string, double> pop_category_counts;
     std::map<std::string, size_t> job_counts_by_type;
+    std::map<std::string, size_t> inactive_job_record_counts_by_type;
     std::map<std::string, double> workforce_by_job_type;
     std::map<std::string, double> species_counts_by_id;
     std::map<std::string, double> species_counts_by_name;
     std::map<std::string, double> enslaved_by_species_id;
+    std::set<std::string> inactive_job_types_suppressed;
+    size_t inactive_job_record_count = 0;
 };
 
 struct PlanetSpeciesDistribution {
@@ -1752,11 +1818,14 @@ struct EmpireDemographicRollup {
 
 struct EmpireWorkforceRollup {
     std::map<std::string, size_t> job_counts_by_type;
+    std::map<std::string, size_t> inactive_job_record_counts_by_type;
     std::map<std::string, double> workforce_by_job_type;
     std::map<std::string, double> pop_category_counts;
     std::map<std::string, double> pop_category_share;
     std::map<std::string, std::map<std::string, size_t>> jobs_by_planet;
+    std::map<std::string, std::map<std::string, size_t>> inactive_jobs_by_planet;
     std::map<std::string, std::map<std::string, double>> pop_categories_by_planet;
+    size_t inactive_job_records_suppressed = 0;
 };
 
 struct EmpireRollups {
@@ -1811,7 +1880,13 @@ static ColonyDemographicRollup build_colony_demographic_rollup(const std::string
         if (it == ix.pop_jobs.end()) continue;
         const std::string type = scalar_or(child(it->second, "type"));
         if (type.empty()) continue;
-        out.job_counts_by_type[type]++;
+        if (is_dashboard_active_pop_job(it->second)) {
+            out.job_counts_by_type[type]++;
+        } else {
+            out.inactive_job_record_count++;
+            out.inactive_job_record_counts_by_type[type]++;
+            out.inactive_job_types_suppressed.insert(type);
+        }
         if (auto workforce = scalar_double(child(it->second, "workforce"))) {
             if (*workforce >= 0.0) out.workforce_by_job_type[type] += *workforce;
         }
@@ -1851,6 +1926,11 @@ static EmpireRollups build_empire_rollups(const std::vector<std::string>& owned_
         for (const auto& [type, count] : colony.job_counts_by_type) {
             out.workforce.job_counts_by_type[type] += count;
             out.workforce.jobs_by_planet[pid][type] += count;
+        }
+        for (const auto& [type, count] : colony.inactive_job_record_counts_by_type) {
+            out.workforce.inactive_job_record_counts_by_type[type] += count;
+            out.workforce.inactive_jobs_by_planet[pid][type] += count;
+            out.workforce.inactive_job_records_suppressed += count;
         }
         for (const auto& [type, workforce] : colony.workforce_by_job_type) {
             out.workforce.workforce_by_job_type[type] += workforce;
@@ -1967,10 +2047,14 @@ static void write_workforce_summary(JsonWriter& j, const EmpireWorkforceRollup& 
     j.key("workforce_summary");
     j.begin_object();
     j.key("job_counts_by_type"); write_count_object(j, workforce.job_counts_by_type);
+    j.key("active_job_counts_by_type"); write_count_object(j, workforce.job_counts_by_type);
+    j.key("inactive_job_record_counts_by_type"); write_count_object(j, workforce.inactive_job_record_counts_by_type);
     j.key("workforce_by_job_type"); write_number_object(j, workforce.workforce_by_job_type);
     j.key("pop_category_counts"); write_number_object(j, workforce.pop_category_counts);
     j.key("pop_category_share"); write_number_object(j, workforce.pop_category_share);
     j.key("jobs_by_planet"); write_nested_count_object(j, workforce.jobs_by_planet);
+    j.key("active_jobs_by_planet"); write_nested_count_object(j, workforce.jobs_by_planet);
+    j.key("inactive_jobs_by_planet"); write_nested_count_object(j, workforce.inactive_jobs_by_planet);
     j.key("pop_categories_by_planet"); write_nested_number_object(j, workforce.pop_categories_by_planet);
     j.end_object();
 }
@@ -2064,6 +2148,17 @@ static void write_colony_derived_summary(JsonWriter& j,
     j.key("job_counts_by_type");
     if (colony_rollup) write_count_object(j, colony_rollup->job_counts_by_type);
     else { j.begin_object(); j.end_object(); }
+    j.key("active_job_counts_by_type");
+    if (colony_rollup) write_count_object(j, colony_rollup->job_counts_by_type);
+    else { j.begin_object(); j.end_object(); }
+    j.key("inactive_job_record_counts_by_type");
+    if (colony_rollup) write_count_object(j, colony_rollup->inactive_job_record_counts_by_type);
+    else { j.begin_object(); j.end_object(); }
+    j.key("inactive_job_record_count");
+    j.raw_number(std::to_string(colony_rollup ? colony_rollup->inactive_job_record_count : 0));
+    j.key("inactive_job_types_suppressed");
+    if (colony_rollup) write_string_array(j, colony_rollup->inactive_job_types_suppressed);
+    else { j.begin_array(); j.end_array(); }
     j.key("workforce_by_job_type");
     if (colony_rollup) write_number_object(j, colony_rollup->workforce_by_job_type);
     else { j.begin_object(); j.end_object(); }
@@ -2331,6 +2426,53 @@ static void write_planet(JsonWriter& j, const std::string& planet_id, const PdxV
     j.end_object();
 }
 
+static bool is_non_military_ship_class(const std::string& ship_class) {
+    static const std::set<std::string> excluded = {
+        "shipclass_starbase",
+        "shipclass_mining_station",
+        "shipclass_research_station",
+        "shipclass_science_ship",
+        "shipclass_constructor",
+    };
+    return excluded.find(ship_class) != excluded.end();
+}
+
+static bool fleet_has_non_military_flag(const PdxValue* fleet) {
+    return pdx_truthy(child(fleet, "station")) ||
+           pdx_truthy(child(fleet, "orbital_station")) ||
+           pdx_truthy(child(fleet, "civilian"));
+}
+
+static std::set<std::string> fleet_ship_classes(const PdxValue* fleet, const SaveIndexes& ix) {
+    std::set<std::string> classes;
+    const std::string direct = scalar_or(child(fleet, "ship_class"));
+    if (!direct.empty()) classes.insert(direct);
+    for (const std::string& sid : scalar_id_list_from_child(fleet, "ships")) {
+        auto sit = ix.ships.find(sid);
+        if (sit == ix.ships.end()) continue;
+        const std::string ship_class = scalar_or(child(sit->second, "ship_class"));
+        if (!ship_class.empty()) classes.insert(ship_class);
+    }
+    return classes;
+}
+
+static bool is_dashboard_military_fleet(const PdxValue* fleet, const SaveIndexes& ix) {
+    if (!fleet) return false;
+    if (fleet_has_non_military_flag(fleet)) return false;
+
+    const std::set<std::string> classes = fleet_ship_classes(fleet, ix);
+    for (const std::string& ship_class : classes) {
+        if (is_non_military_ship_class(ship_class)) return false;
+    }
+
+    const double military_power = scalar_double(child(fleet, "military_power")).value_or(0.0);
+    const double combat_power = scalar_double(child(fleet, "combat_power")).value_or(0.0);
+    const double fleet_size = scalar_double(child(fleet, "fleet_size")).value_or(0.0);
+    const double command_limit = scalar_double(child(fleet, "command_limit")).value_or(0.0);
+    if (military_power == 0.0 && combat_power == 0.0 && fleet_size == 0.0 && command_limit == 0.0) return false;
+    return true;
+}
+
 static void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fleet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_leaders) {
     (void)defs;
     j.begin_object();
@@ -2341,7 +2483,16 @@ static void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxVal
     json_optional_scalar(j, fleet, "combat_power");
     json_optional_scalar(j, fleet, "fleet_size");
     json_optional_scalar(j, fleet, "command_limit");
+    json_optional_scalar(j, fleet, "ship_class");
+    json_optional_scalar(j, fleet, "station");
+    json_optional_scalar(j, fleet, "orbital_station");
+    json_optional_scalar(j, fleet, "civilian");
     if (const PdxValue* coord = child(fleet, "coordinate")) { j.key("coordinate"); write_pdx_as_json(j, coord); }
+    const std::set<std::string> ship_classes = fleet_ship_classes(fleet, ix);
+    j.key("ship_classes");
+    j.begin_array();
+    for (const std::string& ship_class : ship_classes) j.value(ship_class);
+    j.end_array();
     std::string admiral = scalar_or(child(fleet, "leader"));
     if (admiral.empty()) admiral = scalar_or(child(fleet, "commander"));
     if (!admiral.empty() && admiral != "4294967295") {
@@ -2388,6 +2539,32 @@ static std::vector<std::string> select_country_ids(const Settings& st, const Sav
     }
     return st.nation_ids;
 }
+
+struct ArmyFormation {
+    std::string formation_name;
+    std::string owner;
+    std::string planet;
+    std::map<std::string, size_t> composition_by_type;
+    std::map<std::string, size_t> composition_by_species;
+    std::vector<std::string> army_ids;
+    double total_health = 0.0;
+    double total_morale = 0.0;
+    double total_experience = 0.0;
+    size_t health_count = 0;
+    size_t morale_count = 0;
+    size_t experience_count = 0;
+};
+
+struct ArmyExportContext {
+    std::vector<ArmyFormation> formations;
+    std::vector<std::string> non_defense_army_ids;
+    std::vector<std::string> unresolved_army_ids;
+    size_t defense_armies_suppressed = 0;
+};
+
+static ArmyExportContext build_army_export_context(const PdxValue* country, const SaveIndexes& ix);
+static void write_army_record(JsonWriter& j, const std::string& aid, const PdxValue* army, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_species);
+static void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context);
 
 struct TimelinePoint {
     std::string game_date;
@@ -2452,6 +2629,23 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     EmpireRollups rollups = build_empire_rollups(owned_planets, ix);
     for (const auto& [sid, _] : rollups.demographics.species) referenced_species.insert(sid);
     MapExportContext map_context = build_map_export_context(owned_planets, controlled_planets, owned_fleet_ids, capital_id, ix);
+    std::vector<std::string> military_fleet_ids;
+    size_t suppressed_non_military_fleet_count = 0;
+    for (const std::string& fid : owned_fleet_ids) {
+        auto fit = ix.fleets.find(fid);
+        if (fit == ix.fleets.end()) continue;
+        if (is_dashboard_military_fleet(fit->second, ix)) military_fleet_ids.push_back(fid);
+        else suppressed_non_military_fleet_count++;
+    }
+    ArmyExportContext army_context = build_army_export_context(country, ix);
+    for (const ArmyFormation& formation : army_context.formations) {
+        for (const auto& [species_id, _] : formation.composition_by_species) {
+            if (!species_id.empty() && species_id != "unknown") referenced_species.insert(species_id);
+        }
+    }
+    const PdxValue* stored_resources = nested_child(country, {"standard_economy_module", "resources"});
+    if (!stored_resources) stored_resources = nested_child(country, {"modules", "standard_economy_module", "resources"});
+    const size_t stored_resource_count = direct_named_child_count(stored_resources);
     summary.systems_exported = map_context.systems.size();
 
     j.begin_object();
@@ -2538,9 +2732,13 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     write_systems_block(j, map_context, ix, st);
     write_map_summary(j, map_context);
 
+    j.key("stored_resources");
+    if (stored_resources) write_pdx_as_json(j, stored_resources);
+    else { j.begin_object(); j.end_object(); }
+
     j.key("fleets");
     j.begin_array();
-    for (const std::string& fid : owned_fleet_ids) {
+    for (const std::string& fid : military_fleet_ids) {
         auto it = ix.fleets.find(fid);
         if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders);
         else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); j.value(fid); j.key("resolved"); j.value(false); j.end_object(); }
@@ -2549,28 +2747,12 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
 
     j.key("owned_armies");
     j.begin_array();
-    for (const std::string& aid : scalar_id_list_from_child(country, "owned_armies")) {
-        auto it = ix.armies.find(aid);
-        j.begin_object();
-        j.key("army_id"); j.value(aid);
-        if (it != ix.armies.end()) {
-            j.key("name"); j.value(localized_name(child(it->second, "name")));
-            std::string type = scalar_or(child(it->second, "type"));
-            j.key("type"); j.value(type);
-            if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
-            for (const std::string& k : {"owner", "species", "planet", "health", "max_health", "morale"}) {
-                if (const PdxValue* v = child(it->second, k)) { j.key(k); write_pdx_as_json(j, v); }
-            }
-            std::string sid = scalar_or(child(it->second, "species"));
-            if (!sid.empty()) referenced_species.insert(sid);
-            if (st.include_source_locations) { j.key("source"); write_source(j, it->second); }
-        } else {
-            add_unresolved("army", aid, "country.owned_armies");
-            j.key("resolved"); j.value(false);
-        }
-        j.end_object();
+    for (const std::string& aid : army_context.unresolved_army_ids) {
+        add_unresolved("army", aid, "country.owned_armies");
+        j.begin_object(); j.key("army_id"); j.value(aid); j.key("resolved"); j.value(false); j.end_object();
     }
     j.end_array();
+    write_army_formations(j, army_context);
 
     j.key("species");
     j.begin_object();
@@ -2611,12 +2793,16 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.begin_object();
     for (const std::string& k : {"economy_power", "tech_power", "empire_size", "victory_score", "victory_rank", "num_sapient_pops", "employable_pops"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
     if (const PdxValue* budget = child(country, "budget")) { if (const PdxValue* balance = child(budget, "balance")) { j.key("monthly_net_resources"); write_pdx_as_json(j, balance); } }
+    j.key("stored_resources");
+    if (stored_resources) write_pdx_as_json(j, stored_resources);
+    else { j.begin_object(); j.end_object(); }
     j.end_object();
     j.key("military");
     j.begin_object();
     for (const std::string& k : {"military_power", "fleet_size", "used_naval_capacity"}) { if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_json(j, v); } }
-    j.key("fleet_count"); j.raw_number(std::to_string(owned_fleet_ids.size()));
-    j.key("army_count"); j.raw_number(std::to_string(scalar_id_list_from_child(country, "owned_armies").size()));
+    j.key("fleet_count"); j.raw_number(std::to_string(military_fleet_ids.size()));
+    j.key("army_count"); j.raw_number(std::to_string(army_context.non_defense_army_ids.size()));
+    j.key("suppressed_non_military_fleet_count"); j.raw_number(std::to_string(suppressed_non_military_fleet_count));
     j.end_object();
     j.key("map");
     j.begin_object();
@@ -2641,6 +2827,12 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     }
     j.key("systems_exported_count"); j.raw_number(std::to_string(map_context.systems.size()));
     j.key("colony_systems_exported_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
+    j.key("inactive_job_records_suppressed"); j.raw_number(std::to_string(rollups.workforce.inactive_job_records_suppressed));
+    j.key("non_military_fleet_records_suppressed"); j.raw_number(std::to_string(suppressed_non_military_fleet_count));
+    j.key("defense_armies_suppressed"); j.raw_number(std::to_string(army_context.defense_armies_suppressed));
+    j.key("army_formations_count"); j.raw_number(std::to_string(army_context.formations.size()));
+    j.key("has_stored_resources"); j.value(stored_resource_count > 0);
+    j.key("stored_resource_count"); j.raw_number(std::to_string(stored_resource_count));
     j.end_object();
     j.end_object();
 
@@ -2678,6 +2870,12 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
     j.begin_array();
     for (const std::string& sid : rollups.demographics.species_without_resolution) j.value(sid);
     j.end_array();
+    j.key("inactive_job_records_suppressed"); j.raw_number(std::to_string(rollups.workforce.inactive_job_records_suppressed));
+    j.key("non_military_fleet_records_suppressed"); j.raw_number(std::to_string(suppressed_non_military_fleet_count));
+    j.key("defense_armies_suppressed"); j.raw_number(std::to_string(army_context.defense_armies_suppressed));
+    j.key("army_formations_count"); j.raw_number(std::to_string(army_context.formations.size()));
+    j.key("has_stored_resources"); j.value(stored_resource_count > 0);
+    j.key("stored_resource_count"); j.raw_number(std::to_string(stored_resource_count));
     j.end_object();
 
     j.key("references");
@@ -2733,6 +2931,13 @@ static std::pair<CountryExportSummary, TimelinePoint> write_country_output(const
         j.key("fleets"); j.raw_number(std::to_string(ix.fleets.size()));
         j.key("armies"); j.raw_number(std::to_string(ix.armies.size()));
         j.end_object();
+        j.key("raw_owned_armies");
+        j.begin_array();
+        for (const std::string& aid : scalar_id_list_from_child(country, "owned_armies")) {
+            auto it = ix.armies.find(aid);
+            write_army_record(j, aid, it != ix.armies.end() ? it->second : nullptr, st, defs, referenced_species);
+        }
+        j.end_array();
         j.end_object();
     }
 
@@ -3026,6 +3231,112 @@ static void write_performance_log(const fs::path& path, const std::vector<SavePe
     j.end_object();
     j.end_object();
     j.end_object();
+}
+
+static bool is_defense_army(const PdxValue* army) {
+    return lower_copy(scalar_or(child(army, "type"))) == "defense_army";
+}
+
+static std::string army_formation_name(const std::string& army_id, const PdxValue* army) {
+    const std::string fleet_name = localized_name(child(army, "fleet_name"));
+    if (!fleet_name.empty()) return fleet_name;
+    const std::string planet = scalar_or(child(army, "planet"), scalar_or(child(army, "spawning_planet")));
+    const std::string type = scalar_or(child(army, "type"), "army");
+    if (!planet.empty()) return "Planet " + planet + " " + type;
+    return "Army Formation " + army_id;
+}
+
+static ArmyExportContext build_army_export_context(const PdxValue* country, const SaveIndexes& ix) {
+    ArmyExportContext ctx;
+    std::map<std::string, ArmyFormation> grouped;
+    for (const std::string& aid : scalar_id_list_from_child(country, "owned_armies")) {
+        auto it = ix.armies.find(aid);
+        if (it == ix.armies.end()) {
+            ctx.unresolved_army_ids.push_back(aid);
+            continue;
+        }
+        const PdxValue* army = it->second;
+        if (is_defense_army(army)) {
+            ctx.defense_armies_suppressed++;
+            continue;
+        }
+
+        ctx.non_defense_army_ids.push_back(aid);
+        const std::string name = army_formation_name(aid, army);
+        const std::string owner = scalar_or(child(army, "owner"));
+        const std::string planet = scalar_or(child(army, "planet"), scalar_or(child(army, "spawning_planet")));
+        const std::string type = scalar_or(child(army, "type"), "unknown");
+        const std::string species = scalar_or(child(army, "species"), "unknown");
+        const std::string group_key = !localized_name(child(army, "fleet_name")).empty()
+            ? ("fleet:" + localized_name(child(army, "fleet_name")) + ":owner:" + owner)
+            : ("planet:" + planet + ":type:" + type + ":owner:" + owner);
+
+        ArmyFormation& f = grouped[group_key];
+        if (f.formation_name.empty()) f.formation_name = name;
+        if (f.owner.empty()) f.owner = owner;
+        if (f.planet.empty()) f.planet = planet;
+        f.army_ids.push_back(aid);
+        f.composition_by_type[type]++;
+        f.composition_by_species[species]++;
+        if (auto health = scalar_double(child(army, "health"))) { f.total_health += *health; f.health_count++; }
+        if (auto morale = scalar_double(child(army, "morale"))) { f.total_morale += *morale; f.morale_count++; }
+        if (auto experience = scalar_double(child(army, "experience"))) { f.total_experience += *experience; f.experience_count++; }
+    }
+
+    for (auto& [_, formation] : grouped) ctx.formations.push_back(std::move(formation));
+    std::sort(ctx.formations.begin(), ctx.formations.end(), [](const ArmyFormation& a, const ArmyFormation& b) {
+        return a.formation_name < b.formation_name;
+    });
+    return ctx;
+}
+
+static void write_army_record(JsonWriter& j, const std::string& aid, const PdxValue* army, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_species) {
+    j.begin_object();
+    j.key("army_id"); j.value(aid);
+    if (army) {
+        j.key("name"); j.value(localized_name(child(army, "name")));
+        std::string type = scalar_or(child(army, "type"));
+        j.key("type"); j.value(type);
+        if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
+        for (const std::string& k : {"owner", "species", "planet", "spawning_planet", "health", "max_health", "morale", "experience", "fleet_name"}) {
+            if (const PdxValue* v = child(army, k)) { j.key(k); write_pdx_as_json(j, v); }
+        }
+        std::string sid = scalar_or(child(army, "species"));
+        if (!sid.empty()) referenced_species.insert(sid);
+        if (st.include_source_locations) { j.key("source"); write_source(j, army); }
+        if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_json(j, army); }
+    } else {
+        j.key("resolved"); j.value(false);
+    }
+    j.end_object();
+}
+
+static void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context) {
+    j.key("army_formations");
+    j.begin_array();
+    for (const ArmyFormation& f : army_context.formations) {
+        j.begin_object();
+        j.key("formation_name"); j.value(f.formation_name);
+        j.key("owner"); j.value(f.owner);
+        j.key("planet"); j.value(f.planet);
+        j.key("army_count"); j.raw_number(std::to_string(f.army_ids.size()));
+        j.key("composition_by_type"); write_count_object(j, f.composition_by_type);
+        j.key("composition_by_species"); write_count_object(j, f.composition_by_species);
+        j.key("total_health"); j.raw_number(json_number(f.total_health));
+        j.key("average_health"); j.raw_number(json_number(f.health_count ? f.total_health / static_cast<double>(f.health_count) : 0.0));
+        j.key("total_morale"); j.raw_number(json_number(f.total_morale));
+        j.key("average_morale"); j.raw_number(json_number(f.morale_count ? f.total_morale / static_cast<double>(f.morale_count) : 0.0));
+        if (f.experience_count) {
+            j.key("average_experience");
+            j.raw_number(json_number(f.total_experience / static_cast<double>(f.experience_count)));
+        }
+        j.key("army_ids");
+        j.begin_array();
+        for (const std::string& aid : f.army_ids) j.value(aid);
+        j.end_array();
+        j.end_object();
+    }
+    j.end_array();
 }
 
 struct CliOverrides {

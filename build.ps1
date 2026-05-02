@@ -256,7 +256,9 @@ function Test-GeneratedJson {
             "validation",
             "demographics",
             "workforce_summary",
-            "systems"
+            "systems",
+            "stored_resources",
+            "army_formations"
         )) {
             if (-not (Has-JsonProperty $json $requiredTopLevel)) {
                 throw "$($file.FullName) is missing top-level field: $requiredTopLevel"
@@ -298,6 +300,9 @@ function Test-GeneratedJson {
                 "species_counts_by_id",
                 "pop_category_counts",
                 "job_counts_by_type",
+                "active_job_counts_by_type",
+                "inactive_job_record_count",
+                "inactive_job_types_suppressed",
                 "workforce_by_job_type",
                 "species_counts_by_name"
             )) {
@@ -315,10 +320,71 @@ function Test-GeneratedJson {
             "demographics_matches_country_pop_count",
             "colonies_missing_demographic_summary",
             "systems_exported_count",
-            "colonies_with_unexported_systems"
+            "colonies_with_unexported_systems",
+            "has_stored_resources",
+            "stored_resource_count",
+            "inactive_job_records_suppressed",
+            "non_military_fleet_records_suppressed",
+            "defense_armies_suppressed",
+            "army_formations_count"
         )) {
             if (-not (Has-JsonProperty $json.validation $requiredValidationField)) {
                 throw "$($file.FullName) is missing validation.$requiredValidationField"
+            }
+        }
+
+        if (-not (Has-JsonProperty $json.workforce_summary "active_job_counts_by_type")) {
+            throw "$($file.FullName) is missing workforce_summary.active_job_counts_by_type"
+        }
+
+        if (-not (Has-JsonProperty $json.workforce_summary "inactive_job_record_counts_by_type")) {
+            throw "$($file.FullName) is missing workforce_summary.inactive_job_record_counts_by_type"
+        }
+
+        if (-not (Has-JsonProperty $json.workforce_summary "active_jobs_by_planet")) {
+            throw "$($file.FullName) is missing workforce_summary.active_jobs_by_planet"
+        }
+
+        if ($file.FullName -match '\\2220-12-16\\') {
+            if ((Has-JsonProperty $json.workforce_summary "job_counts_by_type") -and
+                (Has-JsonProperty $json.workforce_summary.job_counts_by_type "crisis_purge")) {
+                throw "$($file.FullName) still exposes crisis_purge in workforce_summary.job_counts_by_type"
+            }
+
+            if ((Has-JsonProperty $json.workforce_summary "active_job_counts_by_type") -and
+                (Has-JsonProperty $json.workforce_summary.active_job_counts_by_type "crisis_purge")) {
+                throw "$($file.FullName) still exposes crisis_purge in workforce_summary.active_job_counts_by_type"
+            }
+
+            foreach ($colony in $colonies) {
+                if ((Has-JsonProperty $colony "resolved") -and $colony.resolved -eq $false) {
+                    continue
+                }
+
+                if ((Has-JsonProperty $colony.derived_summary "job_counts_by_type") -and
+                    (Has-JsonProperty $colony.derived_summary.job_counts_by_type "crisis_purge")) {
+                    throw "$($file.FullName) colony $($colony.planet_id) still exposes crisis_purge in derived_summary.job_counts_by_type"
+                }
+
+                if ((Has-JsonProperty $colony.derived_summary "active_job_counts_by_type") -and
+                    (Has-JsonProperty $colony.derived_summary.active_job_counts_by_type "crisis_purge")) {
+                    throw "$($file.FullName) colony $($colony.planet_id) still exposes crisis_purge in derived_summary.active_job_counts_by_type"
+                }
+            }
+
+            foreach ($army in @($json.owned_armies)) {
+                if ((Has-JsonProperty $army "type") -and $army.type -eq "defense_army") {
+                    throw "$($file.FullName) still exposes defense_army in top-level owned_armies"
+                }
+            }
+
+            $countryMilitaryZero =
+                ([double]$json.country.military_power -eq 0.0) -and
+                ([double]$json.country.fleet_size -eq 0.0) -and
+                ([double]$json.country.used_naval_capacity -eq 0.0)
+
+            if ($countryMilitaryZero -and @($json.fleets).Count -ne 0) {
+                throw "$($file.FullName) has zero country military metrics but non-empty top-level fleets"
             }
         }
 

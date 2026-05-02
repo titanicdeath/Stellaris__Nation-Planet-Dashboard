@@ -17,6 +17,7 @@ This version is aimed at the first practical milestone:
 - Select nations according to `settings.config`.
 - Emit one JSON file per selected nation under `output/<game-date>/`.
 - Resolve planet-owned IDs into self-contained structures where practical.
+- Export dashboard hygiene fields: active job summaries, inactive job diagnostics, military-only fleets, grouped non-defense army formations, and current stored resources.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
 ## Build requirements
@@ -87,6 +88,14 @@ For skip benchmarking:
 ```
 
 The first command cleans build/output and performs a full fresh validation. The second command keeps output and should show unchanged saves skipped before `parse_document`, then validates the existing/generated JSON. This prepares the parser for a future save monitor by making targeted parsing cheap, but the live save monitor itself is not implemented yet.
+
+### Dashboard payload hygiene
+
+Job count summaries now report active dashboard jobs only. Pop job records with sentinel workforce fields (`-1`) or unresolved pop group assignment (`4294967295`) are suppressed from `job_counts_by_type` and `jobs_by_planet`, with inactive counts recorded in colony summaries, `workforce_summary`, and `validation.inactive_job_records_suppressed`. `workforce_by_job_type` remains based on non-negative workforce values.
+
+Top-level `fleets` now contains military fleets only. Starbases, mining/research stations, science ships, constructors, civilian fleets, orbital stations, and zero-power records without military markers are suppressed from that array but remain available through system/map context when relevant.
+
+Top-level expeditionary army output suppresses `defense_army`; non-defense armies are grouped under `army_formations` by `fleet_name` when present, otherwise by planet and army type. Current stockpiles are exported at top-level `stored_resources` from the country standard economy module resources path, with a compact copy under `derived_summary.economy.stored_resources`.
 
 ## Notes on game definitions
 
