@@ -191,10 +191,17 @@ struct Settings {
     bool parse_all_save_files = true;
     std::vector<std::string> specific_save_files;
     bool ignore_autosaves = true;
+    bool latest_save_only = false;
+    bool latest_save_include_autosaves = false;
     bool force_reparse = false;
     bool reparse_when_settings_change = true;
     bool retain_extracted_gamestate = false;
     fs::path retained_gamestate_path;
+
+    bool manifest_enable_skip = true;
+    bool manifest_skip_uses_file_metadata = true;
+    bool manifest_skip_requires_output_files = true;
+    bool manifest_force_reparse = false;
 
     bool parse_all_nations = false;
     bool player_only = true;
@@ -270,10 +277,18 @@ static Settings load_settings(const fs::path& config_path) {
     st.parse_all_save_files = getb("save_selection", "parse_all_save_files", true);
     st.specific_save_files = split_csv(get("save_selection", "specific_save_files"));
     st.ignore_autosaves = getb("save_selection", "ignore_autosaves", true);
+    st.latest_save_only = getb("save_selection", "latest_save_only", false);
+    st.latest_save_include_autosaves = getb("save_selection", "latest_save_include_autosaves", false);
     st.force_reparse = getb("save_selection", "force_reparse", false);
     st.reparse_when_settings_change = getb("save_selection", "reparse_when_settings_change", true);
     st.retain_extracted_gamestate = getb("save_selection", "retain_extracted_gamestate", false);
     st.retained_gamestate_path = resolve_path(st.project_root, get("save_selection", "retained_gamestate_path", "output/_extracted_gamestate"));
+
+    st.manifest_enable_skip = getb("manifest", "enable_skip", true);
+    st.manifest_skip_uses_file_metadata = getb("manifest", "skip_uses_file_metadata", true);
+    st.manifest_skip_requires_output_files = getb("manifest", "skip_requires_output_files", true);
+    st.manifest_force_reparse = getb("manifest", "force_reparse", false);
+    if (st.manifest_force_reparse) st.force_reparse = true;
 
     st.parse_all_nations = getb("nation_selection", "parse_all_nations", false);
     st.player_only = getb("nation_selection", "player_only", true);
@@ -901,12 +916,32 @@ static void write_definition_source(JsonWriter& j, const DefinitionIndex* defs, 
 
 struct ManifestEntry {
     std::string save_path;
+    std::string save_file_name;
+    uintmax_t file_size = 0;
+    std::string last_write_time;
     std::string save_hash;
     std::string settings_hash;
+    std::string parser_version;
     std::string game_date;
     std::vector<std::string> outputs;
     std::string parsed_at;
 };
+
+struct SaveFileMetadata {
+    std::string absolute_path;
+    std::string file_name;
+    uintmax_t file_size = 0;
+    std::string last_write_time;
+};
+
+static SaveFileMetadata get_save_file_metadata(const fs::path& save) {
+    SaveFileMetadata meta;
+    meta.absolute_path = fs::absolute(save).string();
+    meta.file_name = save.filename().string();
+    meta.file_size = fs::file_size(save);
+    meta.last_write_time = std::to_string(fs::last_write_time(save).time_since_epoch().count());
+    return meta;
+}
 
 static std::string json_extract_string_field(const std::string& obj, const std::string& field) {
     const std::string needle = "\"" + field + "\"";
@@ -929,6 +964,9 @@ static std::string json_extract_string_field(const std::string& obj, const std::
     return out;
 }
 
+static uintmax_t json_extract_uint_field(const std::string& obj, const std::string& field);
+static std::vector<std::string> json_extract_string_array_field(const std::string& obj, const std::string& field);
+
 static std::vector<ManifestEntry> load_manifest(const fs::path& p) {
     std::vector<ManifestEntry> out;
     if (!fs::exists(p)) return out;
@@ -943,10 +981,15 @@ static std::vector<ManifestEntry> load_manifest(const fs::path& p) {
         std::string obj = s.substr(obj_start, obj_end - obj_start + 1);
         ManifestEntry e;
         e.save_path = json_extract_string_field(obj, "save_path");
+        e.save_file_name = json_extract_string_field(obj, "save_file_name");
+        e.file_size = json_extract_uint_field(obj, "file_size");
+        e.last_write_time = json_extract_string_field(obj, "last_write_time");
         e.save_hash = json_extract_string_field(obj, "save_hash");
         e.settings_hash = json_extract_string_field(obj, "settings_hash");
+        e.parser_version = json_extract_string_field(obj, "parser_version");
         e.game_date = json_extract_string_field(obj, "game_date");
         e.parsed_at = json_extract_string_field(obj, "parsed_at");
+        e.outputs = json_extract_string_array_field(obj, "outputs");
         if (!e.save_path.empty()) out.push_back(std::move(e));
         pos = obj_end + 1;
     }
@@ -965,8 +1008,12 @@ static void save_manifest(const fs::path& p, const std::vector<ManifestEntry>& e
     for (const auto& e : entries) {
         j.begin_object();
         j.key("save_path"); j.value(e.save_path);
+        j.key("save_file_name"); j.value(e.save_file_name);
+        j.key("file_size"); j.raw_number(std::to_string(e.file_size));
+        j.key("last_write_time"); j.value(e.last_write_time);
         j.key("save_hash"); j.value(e.save_hash);
         j.key("settings_hash"); j.value(e.settings_hash);
+        j.key("parser_version"); j.value(e.parser_version);
         j.key("game_date"); j.value(e.game_date);
         j.key("parsed_at"); j.value(e.parsed_at);
         j.key("outputs");
@@ -979,15 +1026,59 @@ static void save_manifest(const fs::path& p, const std::vector<ManifestEntry>& e
     j.end_object();
 }
 
-static bool should_skip_from_manifest(const Settings& st, const std::vector<ManifestEntry>& manifest, const fs::path& save, const std::string& save_hash) {
-    if (st.force_reparse) return false;
-    const std::string abs = fs::absolute(save).string();
+static bool outputs_present_for_manifest_entry(const ManifestEntry& e) {
+    if (e.outputs.empty()) return false;
+    for (const auto& out : e.outputs) {
+        if (out.empty() || !fs::exists(fs::path(out))) return false;
+    }
+    return true;
+}
+
+static bool should_skip_from_manifest(const Settings& st,
+                                      const std::vector<ManifestEntry>& manifest,
+                                      const SaveFileMetadata& meta,
+                                      std::string* reason) {
+    auto set_reason = [&](const std::string& r) {
+        if (reason) *reason = r;
+    };
+    if (!st.manifest_enable_skip) { set_reason("manifest skip disabled"); return false; }
+    if (st.force_reparse) { set_reason("force_reparse enabled"); return false; }
+    const std::string parser_version = STELLARIS_PARSER_VERSION;
     for (const auto& e : manifest) {
-        if (e.save_path == abs && e.save_hash == save_hash) {
-            if (st.reparse_when_settings_change && e.settings_hash != st.settings_hash) return false;
+        if (e.save_path == meta.absolute_path) {
+            if (st.manifest_skip_uses_file_metadata) {
+                if (e.file_size == 0 || e.last_write_time.empty()) {
+                    set_reason("manifest entry lacks file metadata");
+                    return false;
+                }
+                if (e.file_size != meta.file_size || e.last_write_time != meta.last_write_time) {
+                    set_reason("save file metadata changed");
+                    return false;
+                }
+            } else {
+                const std::string save_hash = file_hash_fnv1a64(fs::path(meta.absolute_path));
+                if (e.save_hash.empty() || e.save_hash != save_hash) {
+                    set_reason("save file hash changed");
+                    return false;
+                }
+            }
+            if (st.reparse_when_settings_change && e.settings_hash != st.settings_hash) {
+                set_reason("settings hash changed");
+                return false;
+            }
+            if (e.parser_version != parser_version) {
+                set_reason("parser version changed");
+                return false;
+            }
+            if (st.manifest_skip_requires_output_files && !outputs_present_for_manifest_entry(e)) {
+                set_reason("manifest outputs missing");
+                return false;
+            }
+            set_reason("unchanged manifest entry and outputs present");
             return true;
         }
     }
+    set_reason("no matching manifest entry");
     return false;
 }
 
@@ -1200,6 +1291,54 @@ static std::vector<std::string> system_planet_ids(const PdxValue* sys) {
     for (const PdxValue* pv : children(sys, "planet")) {
         std::string id = scalar_or(pv);
         if (!id.empty()) out.push_back(id);
+    }
+    return out;
+}
+
+static uintmax_t json_extract_uint_field(const std::string& obj, const std::string& field) {
+    const std::string needle = "\"" + field + "\"";
+    size_t p = obj.find(needle);
+    if (p == std::string::npos) return 0;
+    p = obj.find(':', p + needle.size());
+    if (p == std::string::npos) return 0;
+    ++p;
+    while (p < obj.size() && std::isspace(static_cast<unsigned char>(obj[p]))) ++p;
+    size_t end = p;
+    while (end < obj.size() && std::isdigit(static_cast<unsigned char>(obj[end]))) ++end;
+    if (end == p) return 0;
+    try {
+        return static_cast<uintmax_t>(std::stoull(obj.substr(p, end - p)));
+    } catch (...) {
+        return 0;
+    }
+}
+
+static std::vector<std::string> json_extract_string_array_field(const std::string& obj, const std::string& field) {
+    std::vector<std::string> out;
+    const std::string needle = "\"" + field + "\"";
+    size_t p = obj.find(needle);
+    if (p == std::string::npos) return out;
+    p = obj.find('[', p + needle.size());
+    if (p == std::string::npos) return out;
+    size_t end = obj.find(']', p + 1);
+    if (end == std::string::npos) return out;
+    std::string arr = obj.substr(p + 1, end - p - 1);
+    size_t q = 0;
+    while (q < arr.size()) {
+        q = arr.find('"', q);
+        if (q == std::string::npos) break;
+        ++q;
+        std::string item;
+        bool esc = false;
+        for (; q < arr.size(); ++q) {
+            char c = arr[q];
+            if (esc) { item.push_back(c); esc = false; continue; }
+            if (c == '\\') { esc = true; continue; }
+            if (c == '"') break;
+            item.push_back(c);
+        }
+        out.push_back(std::move(item));
+        if (q < arr.size()) ++q;
     }
     return out;
 }
@@ -2650,13 +2789,30 @@ static std::vector<fs::path> discover_saves(const Settings& st) {
             const std::string filename = ent.path().filename().string();
             const std::string ext = lower_copy(ent.path().extension().string());
             if (ext != ".sav" && filename != "gamestate" && ext != ".txt") continue;
-            if (st.ignore_autosaves && starts_with_ci(filename, "autosave")) continue;
+            if (st.ignore_autosaves && !(st.latest_save_only && st.latest_save_include_autosaves) && starts_with_ci(filename, "autosave")) continue;
             saves.push_back(ent.path());
         }
     } else {
-        for (const auto& f : st.specific_save_files) saves.push_back(st.save_files_path / f);
+        for (const auto& f : st.specific_save_files) {
+            fs::path p = st.save_files_path / f;
+            if (!fs::exists(p)) throw std::runtime_error("specific_save_files entry does not exist: " + p.string());
+            saves.push_back(p);
+        }
     }
     std::sort(saves.begin(), saves.end());
+    if (st.latest_save_only && !saves.empty()) {
+        const bool include_autosaves = st.latest_save_include_autosaves;
+        std::vector<fs::path> latest_candidates;
+        for (const auto& save : saves) {
+            if (!include_autosaves && starts_with_ci(save.filename().string(), "autosave")) continue;
+            latest_candidates.push_back(save);
+        }
+        if (latest_candidates.empty()) return {};
+        auto latest_it = std::max_element(latest_candidates.begin(), latest_candidates.end(), [](const fs::path& a, const fs::path& b) {
+            return fs::last_write_time(a) < fs::last_write_time(b);
+        });
+        return {*latest_it};
+    }
     return saves;
 }
 
@@ -2693,6 +2849,7 @@ struct CountryPerformance {
 struct SavePerformance {
     std::string save_file;
     bool skipped = false;
+    std::string skip_reason;
     size_t gamestate_bytes = 0;
     size_t indexed_countries = 0;
     size_t indexed_planets = 0;
@@ -2718,6 +2875,7 @@ struct RunPerformance {
     size_t saves_skipped = 0;
     size_t total_gamestate_bytes = 0;
     double total_manifest_check_seconds = 0.0;
+    double total_skipped_seconds = 0.0;
     double total_load_gamestate_seconds = 0.0;
     double total_parse_document_seconds = 0.0;
     double total_build_indexes_seconds = 0.0;
@@ -2749,7 +2907,10 @@ static void print_perf_line(const std::string& label, double seconds) {
 
 static void print_save_performance(const SavePerformance& perf) {
     std::cout << "[perf] " << perf.save_file << "\n";
-    if (perf.skipped) std::cout << "  skipped: true\n";
+    if (perf.skipped) {
+        std::cout << "  skipped: true\n";
+        std::cout << "  skip_reason: " << perf.skip_reason << "\n";
+    }
     std::cout << "  gamestate_bytes: " << perf.gamestate_bytes << "\n";
     std::cout << "  indexed_countries: " << perf.indexed_countries << "\n";
     std::cout << "  indexed_planets: " << perf.indexed_planets << "\n";
@@ -2782,6 +2943,7 @@ static void print_total_performance(const RunPerformance& perf) {
     std::cout << "  saves_skipped: " << perf.saves_skipped << "\n";
     std::cout << "  total_gamestate_bytes: " << perf.total_gamestate_bytes << "\n";
     print_perf_line("total_manifest_check", perf.total_manifest_check_seconds);
+    print_perf_line("total_skipped_time", perf.total_skipped_seconds);
     print_perf_line("total_load_gamestate", perf.total_load_gamestate_seconds);
     print_perf_line("total_parse_document", perf.total_parse_document_seconds);
     print_perf_line("total_build_indexes", perf.total_build_indexes_seconds);
@@ -2810,6 +2972,7 @@ static void write_performance_log(const fs::path& path, const std::vector<SavePe
         j.begin_object();
         j.key("save_file"); j.value(save.save_file);
         j.key("skipped"); j.value(save.skipped);
+        j.key("skip_reason"); j.value(save.skip_reason);
         j.key("gamestate_bytes"); j.raw_number(std::to_string(save.gamestate_bytes));
         j.key("indexed_countries"); j.raw_number(std::to_string(save.indexed_countries));
         j.key("indexed_planets"); j.raw_number(std::to_string(save.indexed_planets));
@@ -2850,6 +3013,7 @@ static void write_performance_log(const fs::path& path, const std::vector<SavePe
     j.key("total_gamestate_bytes"); j.raw_number(std::to_string(total.total_gamestate_bytes));
     j.key("timings_seconds"); j.begin_object();
     write_duration_field(j, "total_manifest_check", total.total_manifest_check_seconds);
+    write_duration_field(j, "total_skipped_time", total.total_skipped_seconds);
     write_duration_field(j, "total_load_gamestate", total.total_load_gamestate_seconds);
     write_duration_field(j, "total_parse_document", total.total_parse_document_seconds);
     write_duration_field(j, "total_build_indexes", total.total_build_indexes_seconds);
@@ -2864,22 +3028,57 @@ static void write_performance_log(const fs::path& path, const std::vector<SavePe
     j.end_object();
 }
 
+struct CliOverrides {
+    std::vector<std::string> save_files;
+    bool latest_save = false;
+    bool include_autosaves = false;
+    bool force_reparse = false;
+};
+
+static void apply_cli_overrides(Settings& st, const CliOverrides& cli) {
+    if (!cli.save_files.empty()) {
+        st.parse_all_save_files = false;
+        st.specific_save_files = cli.save_files;
+        st.latest_save_only = false;
+    }
+    if (cli.latest_save) {
+        st.parse_all_save_files = true;
+        st.specific_save_files.clear();
+        st.latest_save_only = true;
+    }
+    if (cli.include_autosaves) {
+        st.ignore_autosaves = false;
+        st.latest_save_include_autosaves = true;
+    }
+    if (cli.force_reparse) {
+        st.force_reparse = true;
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         const auto run_start = std::chrono::steady_clock::now();
         fs::path config = "settings.config";
+        CliOverrides cli;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if ((arg == "--config" || arg == "-c") && i + 1 < argc) config = argv[++i];
+            else if (arg == "--save" && i + 1 < argc) cli.save_files.push_back(argv[++i]);
+            else if (arg == "--latest-save") cli.latest_save = true;
+            else if (arg == "--include-autosaves") cli.include_autosaves = true;
+            else if (arg == "--force-reparse") cli.force_reparse = true;
             else if (arg == "--self-test") {
                 return run_parser_self_tests() ? 0 : 1;
             } else if (arg == "--help" || arg == "-h") {
-                std::cout << "Usage: stellaris_parser --config settings.config [--self-test]\n";
+                std::cout << "Usage: stellaris_parser --config settings.config [--self-test] [--save file.sav] [--latest-save] [--include-autosaves] [--force-reparse]\n";
                 return 0;
+            } else {
+                throw std::runtime_error("Unknown argument: " + arg);
             }
         }
 
         Settings st = load_settings(config);
+        apply_cli_overrides(st, cli);
         std::cout << "Stellaris dashboard parser " << STELLARIS_PARSER_VERSION << "\n";
         std::cout << "Project root: " << st.project_root << "\n";
         std::cout << "Save folder:  " << st.save_files_path << "\n";
@@ -2912,18 +3111,22 @@ int main(int argc, char** argv) {
             std::cout << "\n=== " << save_path.filename().string() << " ===\n";
 
             const auto manifest_check_start = std::chrono::steady_clock::now();
-            const std::string save_hash = file_hash_fnv1a64(save_path);
-            if (should_skip_from_manifest(st, manifest, save_path, save_hash)) {
+            const SaveFileMetadata save_meta = get_save_file_metadata(save_path);
+            std::string skip_reason;
+            if (should_skip_from_manifest(st, manifest, save_meta, &skip_reason)) {
                 save_perf.skipped = true;
+                save_perf.skip_reason = skip_reason;
                 save_perf.manifest_check_seconds = elapsed_seconds_since(manifest_check_start);
                 save_perf.save_total_seconds = elapsed_seconds_since(save_start);
                 run_perf.saves_skipped++;
                 run_perf.total_manifest_check_seconds += save_perf.manifest_check_seconds;
-                std::cout << "Skipping; manifest says this save/settings combination was already parsed.\n";
+                run_perf.total_skipped_seconds += save_perf.save_total_seconds;
+                std::cout << "Skipping; " << skip_reason << ".\n";
                 if (st.print_performance_timings) print_save_performance(save_perf);
                 save_performances.push_back(std::move(save_perf));
                 continue;
             }
+            save_perf.skip_reason = skip_reason;
             save_perf.manifest_check_seconds = elapsed_seconds_since(manifest_check_start);
             run_perf.saves_parsed++;
             run_perf.total_manifest_check_seconds += save_perf.manifest_check_seconds;
@@ -2966,9 +3169,13 @@ int main(int argc, char** argv) {
             std::cout << "Selected countries: " << selected.size() << "\n";
 
             ManifestEntry me;
-            me.save_path = fs::absolute(save_path).string();
-            me.save_hash = save_hash;
+            me.save_path = save_meta.absolute_path;
+            me.save_file_name = save_meta.file_name;
+            me.file_size = save_meta.file_size;
+            me.last_write_time = save_meta.last_write_time;
+            me.save_hash = st.manifest_skip_uses_file_metadata ? "" : file_hash_fnv1a64(save_path);
             me.settings_hash = st.settings_hash;
+            me.parser_version = STELLARIS_PARSER_VERSION;
             me.game_date = game_date;
             me.parsed_at = now_iso8601();
 
@@ -3019,10 +3226,10 @@ int main(int argc, char** argv) {
             run_perf.total_export_countries_seconds += save_perf.export_countries_seconds;
             run_perf.total_timeline_point_seconds += save_perf.timeline_point_seconds;
 
-            // Replace older manifest entry for this save hash/settings combo, then append the new one.
+            // Replace older manifest entry for this save, then append the new one.
             const auto manifest_write_start = std::chrono::steady_clock::now();
             manifest.erase(std::remove_if(manifest.begin(), manifest.end(), [&](const ManifestEntry& e) {
-                return e.save_path == me.save_path && e.save_hash == me.save_hash && e.settings_hash == me.settings_hash;
+                return e.save_path == me.save_path;
             }), manifest.end());
             manifest.push_back(std::move(me));
             save_manifest(st.manifest_path, manifest, st.pretty_json);
@@ -3036,47 +3243,60 @@ int main(int argc, char** argv) {
         if (st.export_timeline) {
             const auto timeline_write_start = std::chrono::steady_clock::now();
             fs::path timeline_dir = st.output_path / "timeline";
-            for (auto& kv : timeline_by_country) {
-                if (kv.second.empty()) continue;
-                std::sort(kv.second.begin(), kv.second.end(), [](const TimelinePoint& a, const TimelinePoint& b) { return a.game_date < b.game_date; });
-                const TimelinePoint& last = kv.second.back();
-                fs::path tfile = timeline_dir / (kv.first + "-(" + sanitize_filename(last.country_name) + ").timeline.json");
-                fs::create_directories(tfile.parent_path());
-                std::ofstream tout(tfile, std::ios::binary);
-                JsonWriter tj(tout, st.pretty_json);
-                tj.begin_object();
-                tj.key("schema_version"); tj.value("dashboard-country-timeline-v0.1");
-                tj.key("country_id"); tj.value(kv.first);
-                tj.key("country_name"); tj.value(last.country_name);
-                tj.key("snapshots"); tj.begin_array();
-                for (const auto& p : kv.second) {
-                    tj.begin_object();
-                    tj.key("game_date"); tj.value(p.game_date);
-                    tj.key("save_file"); tj.value(p.save_file);
-                    tj.key("country_id"); tj.value(p.country_id);
-                    tj.key("country_name"); tj.value(p.country_name);
-                    tj.key("colony_count"); tj.value(p.colony_count);
-                    tj.key("total_pops"); tj.value(p.total_pops);
-                    tj.key("military_power"); tj.value(p.military_power);
-                    tj.key("economy_power"); tj.value(p.economy_power);
-                    tj.key("tech_power"); tj.value(p.tech_power);
-                    tj.key("victory_score"); tj.value(p.victory_score);
-                    tj.key("victory_rank"); tj.value(p.victory_rank);
-                    tj.key("fleet_size"); tj.value(p.fleet_size);
-                    tj.key("used_naval_capacity"); tj.value(p.used_naval_capacity);
-                    tj.key("empire_size"); tj.value(p.empire_size);
-                    tj.key("warning_count"); tj.raw_number(std::to_string(p.warnings));
-                    tj.key("unresolved_reference_count"); tj.raw_number(std::to_string(p.unresolved_references));
-                    tj.key("output_json_path"); tj.value(fs::absolute(p.output_file).string());
-                    tj.end_object();
+            bool existing_timeline_outputs = false;
+            if (saves.size() == 1 && fs::exists(timeline_dir)) {
+                for (const auto& ent : fs::directory_iterator(timeline_dir)) {
+                    if (ent.is_regular_file() && lower_copy(ent.path().extension().string()) == ".json") {
+                        existing_timeline_outputs = true;
+                        break;
+                    }
                 }
-                tj.end_array();
-                tj.end_object();
-                tout.flush();
-                tout.close();
-                const std::string timeline_json = read_text_file(tfile);
-                if (!looks_like_valid_json_object(timeline_json)) {
-                    throw std::runtime_error("Exported invalid timeline JSON: " + tfile.string());
+            }
+            if (existing_timeline_outputs && !timeline_by_country.empty()) {
+                std::cout << "Timeline export: preserving existing timeline files during single-save targeted run.\n";
+            } else {
+                for (auto& kv : timeline_by_country) {
+                    if (kv.second.empty()) continue;
+                    std::sort(kv.second.begin(), kv.second.end(), [](const TimelinePoint& a, const TimelinePoint& b) { return a.game_date < b.game_date; });
+                    const TimelinePoint& last = kv.second.back();
+                    fs::path tfile = timeline_dir / (kv.first + "-(" + sanitize_filename(last.country_name) + ").timeline.json");
+                    fs::create_directories(tfile.parent_path());
+                    std::ofstream tout(tfile, std::ios::binary);
+                    JsonWriter tj(tout, st.pretty_json);
+                    tj.begin_object();
+                    tj.key("schema_version"); tj.value("dashboard-country-timeline-v0.1");
+                    tj.key("country_id"); tj.value(kv.first);
+                    tj.key("country_name"); tj.value(last.country_name);
+                    tj.key("snapshots"); tj.begin_array();
+                    for (const auto& p : kv.second) {
+                        tj.begin_object();
+                        tj.key("game_date"); tj.value(p.game_date);
+                        tj.key("save_file"); tj.value(p.save_file);
+                        tj.key("country_id"); tj.value(p.country_id);
+                        tj.key("country_name"); tj.value(p.country_name);
+                        tj.key("colony_count"); tj.value(p.colony_count);
+                        tj.key("total_pops"); tj.value(p.total_pops);
+                        tj.key("military_power"); tj.value(p.military_power);
+                        tj.key("economy_power"); tj.value(p.economy_power);
+                        tj.key("tech_power"); tj.value(p.tech_power);
+                        tj.key("victory_score"); tj.value(p.victory_score);
+                        tj.key("victory_rank"); tj.value(p.victory_rank);
+                        tj.key("fleet_size"); tj.value(p.fleet_size);
+                        tj.key("used_naval_capacity"); tj.value(p.used_naval_capacity);
+                        tj.key("empire_size"); tj.value(p.empire_size);
+                        tj.key("warning_count"); tj.raw_number(std::to_string(p.warnings));
+                        tj.key("unresolved_reference_count"); tj.raw_number(std::to_string(p.unresolved_references));
+                        tj.key("output_json_path"); tj.value(fs::absolute(p.output_file).string());
+                        tj.end_object();
+                    }
+                    tj.end_array();
+                    tj.end_object();
+                    tout.flush();
+                    tout.close();
+                    const std::string timeline_json = read_text_file(tfile);
+                    if (!looks_like_valid_json_object(timeline_json)) {
+                        throw std::runtime_error("Exported invalid timeline JSON: " + tfile.string());
+                    }
                 }
             }
             run_perf.total_timeline_write_seconds = elapsed_seconds_since(timeline_write_start);

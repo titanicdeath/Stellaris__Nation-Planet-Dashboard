@@ -13,6 +13,10 @@ param(
     # Use -KeepOutput to preserve existing output/.
     [switch]$KeepOutput,
 
+    # Fast validation keeps build/output in place and lets manifest skip logic
+    # prove unchanged saves are skipped before gamestate extraction and parsing.
+    [switch]$Fast,
+
     # Optional. Usually leave blank and let CMake choose.
     # Example:
     # .\build.ps1 -Generator "Visual Studio 18 2026"
@@ -385,12 +389,12 @@ if (-not $UseVcpkgEffective -and (Test-Path (Join-Path $Root "vcpkg.json"))) {
 
 Assert-BuildEnvironment
 
-if (($Clean -or $Test) -and (Test-Path ".\build")) {
+if ($Clean -and (Test-Path ".\build")) {
     Write-Host "Removing build directory..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force ".\build"
 }
 
-if ($Test -and -not $KeepOutput -and (Test-Path ".\output")) {
+if ($Test -and -not $Fast -and -not $KeepOutput -and (Test-Path ".\output")) {
     Write-Host "Removing output directory for fresh validation..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force ".\output"
 }
@@ -451,8 +455,14 @@ if ($Test) {
 
     Invoke-NativeTimed -Label "Parser self-test" -File $ParserExe -Arguments @("--self-test") -ElapsedOut ([ref]$selfTestTime)
 
-    # This is the main parser runtime measurement.
-    Invoke-NativeTimed -Label "Parse real saves" -File $ParserExe -Arguments @() -ElapsedOut ([ref]$parseTime)
+    # Full test mode forces a fresh parser pass. Fast mode intentionally does
+    # not clean output or force reparse, so unchanged saves can be skipped.
+    $parserArgs = @()
+    if (-not $Fast) {
+        $parserArgs += "--force-reparse"
+    }
+
+    Invoke-NativeTimed -Label "Parse real saves" -File $ParserExe -Arguments $parserArgs -ElapsedOut ([ref]$parseTime)
 
     Write-Host "`n== JSON/schema validation ==" -ForegroundColor Cyan
     $validationTimer = [System.Diagnostics.Stopwatch]::StartNew()
