@@ -158,6 +158,59 @@ std::string output_date_suffix(const std::string& date) {
     return sanitize_filename(out);
 }
 
+bool is_hard_unresolved_name(const std::string& value) {
+    const std::string s = trim(value);
+    if (s.empty()) return false;
+    if (s.find('$') != std::string::npos || s.find('%') != std::string::npos) return true;
+
+    if (s.find('_') == std::string::npos) return false;
+    bool has_alpha = false;
+    for (unsigned char c : s) {
+        if (std::islower(c)) return false;
+        if (std::isalpha(c)) has_alpha = true;
+    }
+    return has_alpha;
+}
+
+bool is_generated_name_key(const std::string& value) {
+    const std::string s = trim(value);
+    return !is_hard_unresolved_name(s) && s.find('_') != std::string::npos;
+}
+
+std::string make_display_name_from_key(const std::string& value) {
+    std::string s = trim(value);
+    if (!is_generated_name_key(s)) return s;
+
+    const std::string planet_marker = "_PLANET_";
+    const size_t planet_pos = s.find(planet_marker);
+    if (planet_pos != std::string::npos && planet_pos + planet_marker.size() < s.size()) {
+        s = s.substr(planet_pos + planet_marker.size());
+    } else if (starts_with_ci(s, "SPEC_") && s.size() > 5) {
+        s = s.substr(5);
+    } else {
+        const size_t first_underscore = s.find('_');
+        if (first_underscore != std::string::npos && first_underscore + 1 < s.size()) {
+            bool token_prefix = false;
+            for (size_t i = 0; i < first_underscore; ++i) {
+                const unsigned char c = static_cast<unsigned char>(s[i]);
+                if (std::isupper(c)) token_prefix = true;
+                else if (!std::isdigit(c)) {
+                    token_prefix = false;
+                    break;
+                }
+            }
+            if (token_prefix) s = s.substr(first_underscore + 1);
+        }
+    }
+
+    std::replace(s.begin(), s.end(), '_', ' ');
+    return trim(s);
+}
+
+bool is_unresolved_name(const std::string& value) {
+    return is_hard_unresolved_name(value);
+}
+
 // ================================================================
 // Settings
 // ================================================================

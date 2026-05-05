@@ -9,6 +9,7 @@ struct UnresolvedReference {
     std::string kind;
     std::string id;
     std::string context;
+    std::string value;
 };
 
 struct CountryExportSummary {

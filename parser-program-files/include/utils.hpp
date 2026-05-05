@@ -20,3 +20,7 @@ std::string string_hash_fnv1a64(const std::string& s);
 bool looks_like_valid_json_object(const std::string& s);
 std::string output_date_folder(const std::string& date);
 std::string output_date_suffix(const std::string& date);
+bool is_hard_unresolved_name(const std::string& value);
+bool is_generated_name_key(const std::string& value);
+std::string make_display_name_from_key(const std::string& value);
+bool is_unresolved_name(const std::string& value);

@@ -18,6 +18,7 @@ This version is aimed at the first practical milestone:
 - Emit one JSON file per selected nation under `output/<game-date>/`, with filenames ending in `_YYYY-MM-DD.json`.
 - Resolve planet-owned IDs into self-contained structures where practical.
 - Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleets, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
+- Mark unresolved display-name placeholders with diagnostic `*_unresolved` fields until full localisation parsing is implemented.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
 ## Build requirements
@@ -104,6 +105,10 @@ Country finance data is exposed only under top-level `nat_finance_economy`. Its 
 `capital_planet` is a navigation stub with `planet_id`, `name`, `system_id`, and `system_name`; the full capital colony record lives in `colonies[]`. Colonies no longer embed a top-level `system` object; use `derived_summary.system_id` or `derived_summary.map.system_id` to join to top-level `systems`.
 
 JSON ID/reference values are strings throughout the dashboard schema. Object keys under top-level `systems`, `species`, and `leaders` are ID keys. `coordinate.origin` is the explicit exception and remains numeric because it belongs to coordinate data and may use the `4294967295` sentinel.
+
+Full Stellaris localisation from `localisation/*.yml` is not implemented yet. The exporter marks hard unresolved placeholders such as `$...$`, `%...%`, and generic all-uppercase localisation keys with sibling fields like `name_unresolved`, `adjective_unresolved`, `planet_name_unresolved`, `system_name_unresolved`, or `formation_name_unresolved`. Readable generated keys such as `Rixikars_Maw` or `LITHOID3_PLANET_Lonntoch` are cleaned into fallback display names and keep provenance with `*_raw` plus `*_generated_from_key`. `validation.unresolved_name_count` and `validation.unresolved_name_kinds` summarize hard placeholders; `validation.generated_name_key_count` and `validation.generated_name_key_kinds` summarize cleaned generated keys. `warnings.unresolved_references` includes compact `kind="unresolved_name"` entries only for hard unresolved placeholders.
+
+`species_counts_by_name` is a convenience rollup, not a canonical species identity map. When a species name is unresolved, the species ID is appended to the key, for example `"$affix$$base$ [#317]"`, to prevent distinct unresolved species from merging into one count.
 
 ## Notes on game definitions
 

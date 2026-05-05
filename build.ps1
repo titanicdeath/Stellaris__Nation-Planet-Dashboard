@@ -204,6 +204,91 @@ function Get-JsonItemCount {
     return 1
 }
 
+function Test-IsHardUnresolvedDisplayName {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    $s = $Value.Trim()
+    if ($s.Contains('$') -or $s.Contains('%')) {
+        return $true
+    }
+
+    if (-not $s.Contains('_')) {
+        return $false
+    }
+
+    return ($s -match '[A-Za-z]' -and $s -cnotmatch '[a-z]')
+}
+
+function Test-UnresolvedDisplayNameField {
+    param(
+        [object]$Object,
+        [string]$Field,
+        [string]$Marker,
+        [string]$Path
+    )
+
+    if (-not (Has-JsonProperty $Object $Field)) {
+        return
+    }
+
+    $value = $Object.PSObject.Properties[$Field].Value
+    if ($null -eq $value -or $value -isnot [string]) {
+        return
+    }
+
+    if (-not (Test-IsHardUnresolvedDisplayName $value)) {
+        return
+    }
+
+    if (-not (Has-JsonProperty $Object $Marker)) {
+        throw "${Path}.${Field} contains unresolved display name '$value' but is missing $Marker"
+    }
+
+    $markerValue = $Object.PSObject.Properties[$Marker].Value
+    if ($markerValue -ne $true) {
+        throw "${Path}.${Field} contains unresolved display name '$value' but $Marker is not true"
+    }
+}
+
+function Test-GeneratedDisplayNameField {
+    param(
+        [object]$Object,
+        [string]$Field,
+        [string]$RawField,
+        [string]$GeneratedMarker,
+        [string]$Path
+    )
+
+    if (-not (Has-JsonProperty $Object $GeneratedMarker)) {
+        return
+    }
+
+    if ($Object.PSObject.Properties[$GeneratedMarker].Value -ne $true) {
+        throw "${Path}.${GeneratedMarker} must be true when present"
+    }
+
+    if (-not (Has-JsonProperty $Object $RawField)) {
+        throw "${Path}.${GeneratedMarker} is present but ${RawField} is missing"
+    }
+
+    if (-not (Has-JsonProperty $Object $Field)) {
+        throw "${Path}.${GeneratedMarker} is present but ${Field} is missing"
+    }
+
+    $rawValue = $Object.PSObject.Properties[$RawField].Value
+    if ($null -eq $rawValue -or $rawValue -isnot [string] -or [string]::IsNullOrWhiteSpace($rawValue)) {
+        throw "${Path}.${RawField} must be a non-empty string"
+    }
+
+    if (Test-IsHardUnresolvedDisplayName $rawValue) {
+        throw "${Path}.${RawField} contains hard unresolved placeholder '$rawValue' but is marked as generated fallback"
+    }
+}
+
 function Test-JsonScalarIdString {
     param(
         [object]$Value,
@@ -257,7 +342,11 @@ function Test-IsJsonCountOrStatPath {
         return $true
     }
 
-    if ($Name -match '_count$' -or $Name -match '_counts$') {
+    if ($Name -match '_count$' -or $Name -match '_counts$' -or $Name -match '_kinds$') {
+        return $true
+    }
+
+    if ($Path -match '_kinds\.') {
         return $true
     }
 
@@ -463,6 +552,17 @@ function Test-CountryJsonTree {
         throw "$Path contains banned defense_army object"
     }
 
+    Test-UnresolvedDisplayNameField $Value "name" "name_unresolved" $Path
+    Test-UnresolvedDisplayNameField $Value "formation_name" "formation_name_unresolved" $Path
+    Test-UnresolvedDisplayNameField $Value "adjective" "adjective_unresolved" $Path
+    Test-UnresolvedDisplayNameField $Value "planet_name" "planet_name_unresolved" $Path
+    Test-UnresolvedDisplayNameField $Value "system_name" "system_name_unresolved" $Path
+    Test-GeneratedDisplayNameField $Value "name" "name_raw" "name_generated_from_key" $Path
+    Test-GeneratedDisplayNameField $Value "formation_name" "formation_name_raw" "formation_name_generated_from_key" $Path
+    Test-GeneratedDisplayNameField $Value "adjective" "adjective_raw" "adjective_generated_from_key" $Path
+    Test-GeneratedDisplayNameField $Value "planet_name" "planet_name_raw" "planet_name_generated_from_key" $Path
+    Test-GeneratedDisplayNameField $Value "system_name" "system_name_raw" "system_name_generated_from_key" $Path
+
     foreach ($property in $Value.PSObject.Properties) {
         $childPath = "$Path.$($property.Name)"
 
@@ -612,7 +712,7 @@ function Test-GeneratedJson {
         }
 
         if ((Has-JsonProperty $json "capital_planet") -and $null -ne $json.capital_planet) {
-            $allowedCapitalKeys = @("planet_id", "name", "system_id", "system_name")
+            $allowedCapitalKeys = @("planet_id", "name", "name_unresolved", "name_raw", "name_generated_from_key", "system_id", "system_name", "system_name_unresolved", "system_name_raw", "system_name_generated_from_key")
             foreach ($capitalKey in $json.capital_planet.PSObject.Properties.Name) {
                 if ($allowedCapitalKeys -notcontains $capitalKey) {
                     throw "$($file.FullName) capital_planet contains disallowed key: $capitalKey"
@@ -683,10 +783,26 @@ function Test-GeneratedJson {
             "inactive_job_records_suppressed",
             "non_military_fleet_records_suppressed",
             "defense_armies_suppressed",
-            "army_formations_count"
+            "army_formations_count",
+            "unresolved_name_count",
+            "unresolved_name_kinds",
+            "generated_name_key_count",
+            "generated_name_key_kinds"
         )) {
             if (-not (Has-JsonProperty $json.validation $requiredValidationField)) {
                 throw "$($file.FullName) is missing validation.$requiredValidationField"
+            }
+        }
+
+        foreach ($colony in $colonies) {
+            if ((Has-JsonProperty $colony "resolved") -and $colony.resolved -eq $false) {
+                continue
+            }
+
+            foreach ($speciesNameKey in $colony.derived_summary.species_counts_by_name.PSObject.Properties.Name) {
+                if ((Test-IsHardUnresolvedDisplayName $speciesNameKey) -and $speciesNameKey -notmatch ' \[#.+\]$') {
+                    throw "$($file.FullName) colony $($colony.planet_id) has unresolved species_counts_by_name key without species-id disambiguation: $speciesNameKey"
+                }
             }
         }
 

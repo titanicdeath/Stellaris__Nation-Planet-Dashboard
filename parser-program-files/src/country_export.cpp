@@ -12,7 +12,15 @@ void write_id_name_object(JsonWriter& j, const std::string& id, const PdxValue* 
     j.begin_object();
     j.key("id"); j.value(id);
     j.key("block"); j.value(block_name);
-    j.key("name"); j.value(localized_name(child(obj, "name")));
+    const std::string name = localized_name(child(obj, "name"));
+    if (is_generated_name_key(name)) {
+        j.key("name_raw"); j.value(name);
+        j.key("name"); j.value(make_display_name_from_key(name));
+        j.key("name_generated_from_key"); j.value(true);
+    } else {
+        j.key("name"); j.value(name);
+        if (is_hard_unresolved_name(name)) { j.key("name_unresolved"); j.value(true); }
+    }
     if (st.include_source_locations) { j.key("source"); write_source(j, obj); }
     j.end_object();
 }
@@ -131,12 +139,108 @@ bool is_exportable_pop_job(const PdxValue* job) {
 
 bool is_defense_army(const PdxValue* army);
 
-void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue* sp, const Settings& st, const DefinitionIndex* defs) {
+struct NameDiagnostics {
+    std::map<std::string, size_t> unresolved_kinds;
+    std::map<std::string, size_t> generated_kinds;
+    std::vector<UnresolvedReference>* warnings = nullptr;
+
+    size_t unresolved_count() const {
+        size_t total = 0;
+        for (const auto& [_, n] : unresolved_kinds) total += n;
+        return total;
+    }
+
+    size_t generated_count() const {
+        size_t total = 0;
+        for (const auto& [_, n] : generated_kinds) total += n;
+        return total;
+    }
+
+    void add_unresolved(const std::string& kind, const std::string& id, const std::string& context, const std::string& value) {
+        if (value.empty() || !is_hard_unresolved_name(value)) return;
+        unresolved_kinds[kind]++;
+        if (warnings) warnings->push_back(UnresolvedReference{"unresolved_name", id, context, value});
+    }
+
+    void add_generated(const std::string& kind, const std::string& value) {
+        if (value.empty() || !is_generated_name_key(value)) return;
+        generated_kinds[kind]++;
+    }
+};
+
+void write_display_text(JsonWriter& j,
+                        const std::string& field,
+                        const std::string& value,
+                        const std::string& unresolved_field,
+                        NameDiagnostics* diagnostics,
+                        const std::string& kind,
+                        const std::string& id,
+                        const std::string& context) {
+    if (is_hard_unresolved_name(value)) {
+        j.key(field);
+        j.value(value);
+        j.key(unresolved_field);
+        j.value(true);
+        if (diagnostics) diagnostics->add_unresolved(kind, id, context, value);
+        return;
+    }
+
+    if (is_generated_name_key(value)) {
+        j.key(field + "_raw");
+        j.value(value);
+        j.key(field);
+        j.value(make_display_name_from_key(value));
+        j.key(field + "_generated_from_key");
+        j.value(true);
+        if (diagnostics) diagnostics->add_generated(kind, value);
+        return;
+    }
+
+    j.key(field);
+    j.value(value);
+}
+
+void write_name_text(JsonWriter& j,
+                     const std::string& value,
+                     NameDiagnostics* diagnostics,
+                     const std::string& kind,
+                     const std::string& id,
+                     const std::string& context) {
+    write_display_text(j, "name", value, "name_unresolved", diagnostics, kind, id, context);
+}
+
+void write_unresolved_name_kinds(JsonWriter& j, const NameDiagnostics& diagnostics) {
+    j.begin_object();
+    for (const auto& [kind, count] : diagnostics.unresolved_kinds) {
+        j.key(kind);
+        j.raw_number(std::to_string(count));
+    }
+    j.end_object();
+}
+
+void write_generated_name_key_kinds(JsonWriter& j, const NameDiagnostics& diagnostics) {
+    j.begin_object();
+    for (const auto& [kind, count] : diagnostics.generated_kinds) {
+        j.key(kind);
+        j.raw_number(std::to_string(count));
+    }
+    j.end_object();
+}
+
+std::string species_count_display_key(const std::string& species_id, const std::string& name) {
+    if (is_hard_unresolved_name(name)) return name + " [#" + species_id + "]";
+    if (is_generated_name_key(name)) return make_display_name_from_key(name);
+    return name;
+}
+
+void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue* sp, const Settings& st, const DefinitionIndex* defs, NameDiagnostics* diagnostics = nullptr) {
     j.begin_object();
     j.key("species_id"); write_id(j, id);
-    j.key("name"); j.value(localized_name(child(sp, "name")));
+    const std::string name = localized_name(child(sp, "name"));
+    write_name_text(j, name, diagnostics, "species", id, "species.name");
     j.key("plural"); j.value(localized_name(child(sp, "plural")));
-    j.key("adjective"); j.value(localized_name(child(sp, "adjective")));
+    const std::string adjective = localized_name(child(sp, "adjective"));
+    write_display_text(j, "adjective", adjective, "adjective_unresolved", diagnostics, "species", id, "species.adjective");
     json_optional_scalar(j, sp, "class");
     json_optional_scalar(j, sp, "portrait");
     json_optional_scalar(j, sp, "name_list");
@@ -156,11 +260,11 @@ void write_resolved_species(JsonWriter& j, const std::string& id, const PdxValue
     j.end_object();
 }
 
-void write_resolved_leader(JsonWriter& j, const std::string& id, const PdxValue* leader, const Settings& st, const SaveIndexes& ix, const DefinitionIndex* defs) {
+void write_resolved_leader(JsonWriter& j, const std::string& id, const PdxValue* leader, const Settings& st, const SaveIndexes& ix, const DefinitionIndex* defs, NameDiagnostics* diagnostics = nullptr) {
     (void)ix;
     j.begin_object();
     j.key("leader_id"); write_id(j, id);
-    j.key("name"); j.value(localized_name(child(leader, "name")));
+    write_name_text(j, localized_name(child(leader, "name")), diagnostics, "leader", id, "leaders[].name");
     json_optional_scalar(j, leader, "class");
     json_optional_scalar(j, leader, "level");
     json_optional_scalar(j, leader, "species");
@@ -196,10 +300,10 @@ void write_instance_with_type(JsonWriter& j, const std::string& id, const PdxVal
     j.end_object();
 }
 
-void write_system_summary(JsonWriter& j, const std::string& id, const PdxValue* sys, const Settings& st) {
+void write_system_summary(JsonWriter& j, const std::string& id, const PdxValue* sys, const Settings& st, NameDiagnostics* diagnostics = nullptr) {
     j.begin_object();
     j.key("system_id"); write_id(j, id);
-    j.key("name"); j.value(localized_name(child(sys, "name")));
+    write_name_text(j, localized_name(child(sys, "name")), diagnostics, "system", id, "systems[].name");
     if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
     json_optional_scalar(j, sys, "type");
     json_optional_scalar(j, sys, "star_class");
@@ -420,10 +524,11 @@ void write_system_context(JsonWriter& j,
                                  const std::string& system_id,
                                  const PdxValue* sys,
                                  const MapSystemContext& ctx,
-                                 const Settings& st) {
+                                 const Settings& st,
+                                 NameDiagnostics* diagnostics = nullptr) {
     j.begin_object();
     j.key("system_id"); write_id(j, system_id);
-    j.key("name"); j.value(localized_name(child(sys, "name")));
+    write_name_text(j, localized_name(child(sys, "name")), diagnostics, "system", system_id, "systems[].name");
     if (const PdxValue* coord = child(sys, "coordinate")) { j.key("coordinate"); write_pdx_as_schema_json(j, coord, "coordinate"); }
     json_optional_scalar(j, sys, "star_class");
     json_optional_scalar(j, sys, "type");
@@ -443,14 +548,14 @@ void write_system_context(JsonWriter& j,
     j.end_object();
 }
 
-void write_systems_block(JsonWriter& j, const MapExportContext& map_ctx, const SaveIndexes& ix, const Settings& st) {
+void write_systems_block(JsonWriter& j, const MapExportContext& map_ctx, const SaveIndexes& ix, const Settings& st, NameDiagnostics* diagnostics = nullptr) {
     j.key("systems");
     j.begin_object();
     for (const auto& [system_id, ctx] : map_ctx.systems) {
         auto sys_it = ix.galactic_objects.find(system_id);
         if (sys_it == ix.galactic_objects.end()) continue;
         j.key(system_id);
-        write_system_context(j, system_id, sys_it->second, ctx, st);
+        write_system_context(j, system_id, sys_it->second, ctx, st, diagnostics);
     }
     j.end_object();
 }
@@ -826,7 +931,7 @@ ColonyDemographicRollup build_colony_demographic_rollup(const std::string& plane
             std::string resolved = localized_name(child(sp_it->second, "name"));
             if (!resolved.empty()) name = resolved;
         }
-        out.species_counts_by_name[name] += count;
+        out.species_counts_by_name[species_count_display_key(sid, name)] += count;
     }
 
     return out;
@@ -910,7 +1015,7 @@ void write_nested_number_object(JsonWriter& j, const std::map<std::string, std::
     j.end_object();
 }
 
-void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographics) {
+void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographics, NameDiagnostics* diagnostics = nullptr) {
     std::string dominant_species_id;
     double dominant_species_count = -1.0;
     for (const auto& [sid, sp] : demographics.species) {
@@ -934,7 +1039,7 @@ void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographi
     for (const auto& [_, sp] : demographics.species) {
         j.begin_object();
         j.key("species_id"); write_id(j, sp.species_id);
-        j.key("name"); j.value(sp.name);
+        write_name_text(j, sp.name, diagnostics, "species", sp.species_id, "demographics.species[].name");
         j.key("plural"); j.value(sp.plural);
         j.key("class"); j.value(sp.species_class);
         j.key("portrait"); j.value(sp.portrait);
@@ -955,7 +1060,7 @@ void write_demographics(JsonWriter& j, const EmpireDemographicRollup& demographi
         for (const auto& dist : sp.planet_distribution) {
             j.begin_object();
             j.key("planet_id"); write_id(j, dist.planet_id);
-            j.key("planet_name"); j.value(dist.planet_name);
+            write_display_text(j, "planet_name", dist.planet_name, "planet_name_unresolved", diagnostics, "planet", dist.planet_id, "demographics.species[].planet_distribution[].planet_name");
             j.key("pops"); j.raw_number(json_number(dist.pops));
             j.end_object();
         }
@@ -985,7 +1090,8 @@ void write_colony_derived_summary(JsonWriter& j,
                                          const PdxValue* planet,
                                          const SaveIndexes& ix,
                                          const ColonyDemographicRollup* colony_rollup,
-                                         const std::string& capital_id) {
+                                         const std::string& capital_id,
+                                         NameDiagnostics* diagnostics = nullptr) {
     std::string planet_name = localized_name(child(planet, "name"));
     std::string system_id = scalar_or(child(child(planet, "coordinate"), "origin"));
     std::string system_name;
@@ -1039,13 +1145,13 @@ void write_colony_derived_summary(JsonWriter& j,
     j.key("derived_summary");
     j.begin_object();
     j.key("planet_id"); write_id(j, planet_id);
-    if (!planet_name.empty()) { j.key("planet_name"); j.value(planet_name); }
+    if (!planet_name.empty()) write_display_text(j, "planet_name", planet_name, "planet_name_unresolved", diagnostics, "planet", planet_id, "colonies[].derived_summary.planet_name");
     if (!system_id.empty()) { j.key("system_id"); write_id(j, system_id); }
-    if (!system_name.empty()) { j.key("system_name"); j.value(system_name); }
+    if (!system_name.empty()) write_display_text(j, "system_name", system_name, "system_name_unresolved", diagnostics, "system", system_id, "colonies[].derived_summary.system_name");
     j.key("map");
     j.begin_object();
     j.key("system_id"); write_id(j, system_id);
-    j.key("system_name"); j.value(system_name);
+    write_display_text(j, "system_name", system_name, "system_name_unresolved", diagnostics, "system", system_id, "colonies[].derived_summary.map.system_name");
     j.end_object();
     write_optional_child(j, planet, "planet_class", "planet_class");
     write_optional_child(j, planet, "planet_size", "planet_size");
@@ -1114,10 +1220,10 @@ void write_colony_derived_summary(JsonWriter& j,
     j.end_object();
 }
 
-void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, const ColonyDemographicRollup* colony_rollup, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders) {
+void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* planet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, const std::string& capital_id, const ColonyDemographicRollup* colony_rollup, std::set<std::string>& referenced_species, std::set<std::string>& referenced_leaders, NameDiagnostics* diagnostics = nullptr) {
     j.begin_object();
     j.key("planet_id"); write_id(j, planet_id);
-    j.key("name"); j.value(localized_name(child(planet, "name")));
+    write_name_text(j, localized_name(child(planet, "name")), diagnostics, "planet", planet_id, "colonies[].name");
     json_optional_scalar(j, planet, "planet_class");
     json_optional_scalar(j, planet, "planet_size");
     json_optional_scalar(j, planet, "owner");
@@ -1289,7 +1395,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         referenced_leaders.insert(governor);
         j.key("governor");
         auto git = ix.leaders.find(governor);
-        if (git != ix.leaders.end()) write_resolved_leader(j, governor, git->second, st, ix, defs);
+        if (git != ix.leaders.end()) write_resolved_leader(j, governor, git->second, st, ix, defs, diagnostics);
         else { j.begin_object(); j.key("leader_id"); write_id(j, governor); j.key("resolved"); j.value(false); j.end_object(); }
     }
 
@@ -1301,7 +1407,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
         j.begin_object();
         j.key("army_id"); write_id(j, aid);
         if (it != ix.armies.end()) {
-            j.key("name"); j.value(localized_name(child(it->second, "name")));
+            write_name_text(j, localized_name(child(it->second, "name")), diagnostics, "army_formation", aid, "colonies[].armies[].name");
             std::string type = scalar_or(child(it->second, "type"));
             j.key("type"); j.value(type);
             if (defs && !type.empty()) { j.key("definition_source"); write_definition_source(j, defs, type); }
@@ -1322,7 +1428,7 @@ void write_planet(JsonWriter& j, const std::string& planet_id, const PdxValue* p
     if (const PdxValue* mods = child(planet, "planet_modifier")) { j.key("planet_modifiers"); write_pdx_as_schema_json(j, mods, "planet_modifiers"); }
     if (const PdxValue* flags = child(planet, "flags")) { j.key("flags"); write_pdx_as_schema_json(j, flags, "flags"); }
 
-    write_colony_derived_summary(j, planet_id, planet, ix, colony_rollup, capital_id);
+    write_colony_derived_summary(j, planet_id, planet, ix, colony_rollup, capital_id, diagnostics);
 
     if (st.include_source_locations) { j.key("source"); write_source(j, planet); }
     if (st.include_raw_pdx_objects) { j.key("raw"); write_pdx_as_schema_json(j, planet, "raw"); }
@@ -1376,11 +1482,11 @@ bool is_dashboard_military_fleet(const PdxValue* fleet, const SaveIndexes& ix) {
     return true;
 }
 
-void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fleet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_leaders) {
+void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fleet, const SaveIndexes& ix, const Settings& st, const DefinitionIndex* defs, std::set<std::string>& referenced_leaders, NameDiagnostics* diagnostics = nullptr) {
     (void)defs;
     j.begin_object();
     j.key("fleet_id"); write_id(j, fleet_id);
-    j.key("name"); j.value(localized_name(child(fleet, "name")));
+    write_name_text(j, localized_name(child(fleet, "name")), diagnostics, "fleet", fleet_id, "fleets[].name");
     json_optional_scalar(j, fleet, "owner");
     json_optional_scalar(j, fleet, "military_power");
     json_optional_scalar(j, fleet, "combat_power");
@@ -1402,7 +1508,7 @@ void write_fleet(JsonWriter& j, const std::string& fleet_id, const PdxValue* fle
         referenced_leaders.insert(admiral);
         j.key("commander");
         auto it = ix.leaders.find(admiral);
-        if (it != ix.leaders.end()) write_resolved_leader(j, admiral, it->second, st, ix, defs);
+        if (it != ix.leaders.end()) write_resolved_leader(j, admiral, it->second, st, ix, defs, diagnostics);
         else { j.begin_object(); j.key("leader_id"); write_id(j, admiral); j.key("resolved"); j.value(false); j.end_object(); }
     }
     if (const PdxValue* ships = child(fleet, "ships")) {
@@ -1466,13 +1572,14 @@ struct ArmyExportContext {
 };
 
 ArmyExportContext build_army_export_context(const PdxValue* country, const SaveIndexes& ix);
-void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context);
+void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context, NameDiagnostics* diagnostics = nullptr);
 
 void write_capital_planet_stub(JsonWriter& j,
                                       const std::string& capital_id,
                                       const PdxValue* capital,
                                       const MapExportContext& map_context,
-                                      const SaveIndexes& ix) {
+                                      const SaveIndexes& ix,
+                                      NameDiagnostics* diagnostics = nullptr) {
     if (capital_id.empty() || !capital) {
         j.value(nullptr);
         return;
@@ -1489,9 +1596,9 @@ void write_capital_planet_stub(JsonWriter& j,
 
     j.begin_object();
     j.key("planet_id"); write_id(j, capital_id);
-    j.key("name"); j.value(localized_name(child(capital, "name")));
+    write_name_text(j, localized_name(child(capital, "name")), diagnostics, "capital_planet", capital_id, "capital_planet.name");
     j.key("system_id"); write_id(j, system_id);
-    j.key("system_name"); j.value(system_name);
+    write_display_text(j, "system_name", system_name, "system_name_unresolved", diagnostics, "system", system_id, "capital_planet.system_name");
     j.end_object();
 }
 
@@ -1519,6 +1626,9 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     JsonWriter j(out, st.pretty_json);
     std::set<std::string> referenced_species;
     std::set<std::string> referenced_leaders;
+    std::vector<UnresolvedReference> unresolved_refs;
+    NameDiagnostics name_diagnostics;
+    name_diagnostics.warnings = &unresolved_refs;
 
     std::string founder = scalar_or(child(country, "founder_species_ref"));
     std::string built = scalar_or(child(country, "built_species_ref"));
@@ -1570,8 +1680,8 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.key("country");
     j.begin_object();
     j.key("country_id"); write_id(j, country_id);
-    j.key("name"); j.value(summary.country_name);
-    j.key("adjective"); j.value(localized_name(child(country, "adjective")));
+    write_name_text(j, summary.country_name, &name_diagnostics, "country", country_id, "country.name");
+    write_display_text(j, "adjective", localized_name(child(country, "adjective")), "adjective_unresolved", &name_diagnostics, "country_adjective", country_id, "country.adjective");
     for (const std::string& k : {"type", "personality", "capital", "starting_system", "military_power", "economy_power", "tech_power", "victory_rank", "victory_score", "fleet_size", "used_naval_capacity", "empire_size", "num_sapient_pops", "employable_pops", "starbase_capacity", "num_upgraded_starbase", "graphical_culture", "city_graphical_culture", "room"}) {
         if (const PdxValue* v = child(country, k)) { j.key(k); write_pdx_as_schema_json(j, v, k); }
     }
@@ -1590,16 +1700,15 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     write_nat_finance_economy(j, country, stored_resources);
 
     j.key("capital_planet");
-    std::vector<UnresolvedReference> unresolved_refs;
 
     auto add_unresolved = [&](const std::string& kind, const std::string& id, const std::string& ctx) {
-        unresolved_refs.push_back(UnresolvedReference{kind, id, ctx});
+        unresolved_refs.push_back(UnresolvedReference{kind, id, ctx, ""});
     };
 
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
         summary.capital_name = localized_name(child(capital_it->second, "name"));
-        write_capital_planet_stub(j, capital_id, capital_it->second, map_context, ix);
+        write_capital_planet_stub(j, capital_id, capital_it->second, map_context, ix, &name_diagnostics);
     } else {
         if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
         j.value(nullptr);
@@ -1617,7 +1726,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
             auto rollup_it = rollups.colonies.find(pid);
             if (rollup_it != rollups.colonies.end()) colony_rollup = &rollup_it->second;
             else colonies_missing_demographic_summary.push_back(pid);
-            write_planet(j, pid, it->second, ix, st, defs, capital_id, colony_rollup, referenced_species, referenced_leaders);
+            write_planet(j, pid, it->second, ix, st, defs, capital_id, colony_rollup, referenced_species, referenced_leaders, &name_diagnostics);
             summary.exported_colonies++;
         } else {
             add_unresolved("planet", pid, "country.owned_planets");
@@ -1633,16 +1742,16 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     for (const std::string& pid : controlled_planets) write_id(j, pid);
     j.end_array();
 
-    write_demographics(j, rollups.demographics);
+    write_demographics(j, rollups.demographics, &name_diagnostics);
     write_workforce_summary(j, rollups.workforce);
-    write_systems_block(j, map_context, ix, st);
+    write_systems_block(j, map_context, ix, st, &name_diagnostics);
     write_map_summary(j, map_context);
 
     j.key("fleets");
     j.begin_array();
     for (const std::string& fid : military_fleet_ids) {
         auto it = ix.fleets.find(fid);
-        if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders);
+        if (it != ix.fleets.end()) write_fleet(j, fid, it->second, ix, st, defs, referenced_leaders, &name_diagnostics);
         else { add_unresolved("fleet", fid, "country.fleets_manager.owned_fleets"); j.begin_object(); j.key("fleet_id"); write_id(j, fid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_array();
@@ -1654,14 +1763,14 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
         j.begin_object(); j.key("army_id"); write_id(j, aid); j.key("resolved"); j.value(false); j.end_object();
     }
     j.end_array();
-    write_army_formations(j, army_context);
+    write_army_formations(j, army_context, &name_diagnostics);
 
     j.key("species");
     j.begin_object();
     for (const std::string& sid : referenced_species) {
         j.key(sid);
         auto it = ix.species.find(sid);
-        if (it != ix.species.end()) write_resolved_species(j, sid, it->second, st, defs);
+        if (it != ix.species.end()) write_resolved_species(j, sid, it->second, st, defs, &name_diagnostics);
         else { add_unresolved("species", sid, "country.species"); j.begin_object(); j.key("species_id"); write_id(j, sid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
@@ -1671,7 +1780,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     for (const std::string& lid : referenced_leaders) {
         j.key(lid);
         auto it = ix.leaders.find(lid);
-        if (it != ix.leaders.end()) write_resolved_leader(j, lid, it->second, st, ix, defs);
+        if (it != ix.leaders.end()) write_resolved_leader(j, lid, it->second, st, ix, defs, &name_diagnostics);
         else { add_unresolved("leader", lid, "country.leaders"); j.begin_object(); j.key("leader_id"); write_id(j, lid); j.key("resolved"); j.value(false); j.end_object(); }
     }
     j.end_object();
@@ -1725,6 +1834,10 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     }
     j.key("systems_exported_count"); j.raw_number(std::to_string(map_context.systems.size()));
     j.key("colony_systems_exported_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
+    j.key("unresolved_name_count"); j.raw_number(std::to_string(name_diagnostics.unresolved_count()));
+    j.key("unresolved_name_kinds"); write_unresolved_name_kinds(j, name_diagnostics);
+    j.key("generated_name_key_count"); j.raw_number(std::to_string(name_diagnostics.generated_count()));
+    j.key("generated_name_key_kinds"); write_generated_name_key_kinds(j, name_diagnostics);
     j.end_object();
     j.end_object();
 
@@ -1734,6 +1847,10 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.key("capital_in_colonies"); j.value(capital_id.empty() || std::find(owned_planets.begin(), owned_planets.end(), capital_id) != owned_planets.end());
     j.key("unresolved_reference_count"); j.raw_number(std::to_string(unresolved_refs.size()));
     j.key("warning_count"); j.raw_number(std::to_string(unresolved_refs.size()));
+    j.key("unresolved_name_count"); j.raw_number(std::to_string(name_diagnostics.unresolved_count()));
+    j.key("unresolved_name_kinds"); write_unresolved_name_kinds(j, name_diagnostics);
+    j.key("generated_name_key_count"); j.raw_number(std::to_string(name_diagnostics.generated_count()));
+    j.key("generated_name_key_kinds"); write_generated_name_key_kinds(j, name_diagnostics);
     j.key("systems_exported_count"); j.raw_number(std::to_string(map_context.systems.size()));
     j.key("colony_systems_exported_count"); j.raw_number(std::to_string(colony_system_count(map_context)));
     j.key("systems_missing_coordinates"); write_string_array(j, map_context.systems_missing_coordinates);
@@ -1787,6 +1904,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
         j.key("kind"); j.value(ur.kind);
         j.key("id"); j.value(ur.id);
         j.key("context"); j.value(ur.context);
+        if (!ur.value.empty()) { j.key("value"); j.value(ur.value); }
         j.end_object();
     }
     j.end_array();
@@ -1895,12 +2013,13 @@ ArmyExportContext build_army_export_context(const PdxValue* country, const SaveI
     return ctx;
 }
 
-void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context) {
+void write_army_formations(JsonWriter& j, const ArmyExportContext& army_context, NameDiagnostics* diagnostics) {
     j.key("army_formations");
     j.begin_array();
     for (const ArmyFormation& f : army_context.formations) {
         j.begin_object();
-        j.key("formation_name"); j.value(f.formation_name);
+        const std::string id = !f.army_ids.empty() ? f.army_ids.front() : "";
+        write_display_text(j, "formation_name", f.formation_name, "formation_name_unresolved", diagnostics, "army_formation", id, "army_formations[].formation_name");
         j.key("owner"); write_id(j, f.owner);
         j.key("planet"); write_id(j, f.planet);
         j.key("army_count"); j.raw_number(std::to_string(f.army_ids.size()));

@@ -52,6 +52,8 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - `founder_species_ref`, `built_species_ref`
 - optional blocks (`flag`, `ethics`, `government`, etc.)
 
+Full localisation from Stellaris `localisation/*.yml` files is not implemented yet. Display fields may still contain save-side localisation keys or templates. When a display value looks unresolved, the exporter keeps the raw value and adds a sibling marker such as `name_unresolved=true` or `adjective_unresolved=true`.
+
 ## `nat_finance_economy`
 
 `nat_finance_economy` is the only emitted country finance/stockpile block. It contains:
@@ -70,8 +72,10 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 
 - `planet_id`
 - `name`
+- optional `name_unresolved`
 - `system_id`
 - `system_name`
+- optional `system_name_unresolved`
 
 The full capital colony data lives in `colonies[]`; consumers should join by `planet_id`.
 
@@ -102,6 +106,8 @@ Each resolved colony object includes `derived_summary` without removing or rewri
 - local composition: `district_counts_by_type`, `building_counts_by_type`, `deposit_counts_by_type`
 - demographics/workforce: `pop_category_counts`, `job_counts_by_type`, `workforce_by_job_type`, `species_counts_by_name`
 - diagnostics: `warning_count`
+
+`planet_name` and `system_name` may include `planet_name_unresolved` or `system_name_unresolved` when the value is a hard localisation placeholder. Readable generated keys are cleaned into fallback names and keep the original value in `planet_name_raw` or `system_name_raw` with `planet_name_generated_from_key=true` or `system_name_generated_from_key=true`. `species_counts_by_name` is still a convenience map for dashboards, but hard unresolved species names are disambiguated with the species ID, for example `"$affix$$base$ [#317]"`, so distinct species are not silently merged under the same unresolved template.
 
 `derived_summary.presentation_card` is a stable compact display object for dashboard cards:
 
@@ -134,6 +140,7 @@ Each `systems.<system_id>` entry emits:
 - `starbase_ids` from the system object when available
 - `hyperlanes` from the system object, or an empty array
 - `is_colony_system`, `has_capital`, and `capital_planet_id` when applicable
+- optional `name_unresolved` when the system name is still a localisation placeholder
 
 `map_summary` is a compact dashboard convenience object:
 
@@ -154,6 +161,29 @@ Both are keyed objects where keys are IDs referenced from the selected country c
 - resolved entries include expanded details
 - unresolved entries include `resolved=false`
 - unresolved entries are mirrored in `warnings.unresolved_references`
+- resolved display names may include `name_unresolved=true`; species adjectives may include `adjective_unresolved=true`
+
+## Unresolved Localisation Diagnostics
+
+This milestone does not resolve full Stellaris localisation. Instead, it separates hard unresolved placeholders from readable generated keys.
+
+Hard unresolved placeholders include:
+
+- values containing `$`, such as `$affix$$base$`
+- values containing `%`, such as `%ADJECTIVE%`
+- generic all-uppercase localisation keys without a useful suffix, such as `PLANET_NAME_FORMAT` or `HABITAT_PLANET_NAME`
+
+For hard unresolved placeholders, the original value is preserved and a sibling marker is emitted:
+
+- `name` -> `name_unresolved`
+- `adjective` -> `adjective_unresolved`
+- `planet_name` -> `planet_name_unresolved`
+- `system_name` -> `system_name_unresolved`
+- `formation_name` -> `formation_name_unresolved`
+
+Readable generated keys such as `LITHOID3_PLANET_Lonntoch`, `SPEC_Magonid_planet`, or `Rixikars_Maw` are cleaned into fallback display names. The original value is emitted as `*_raw`, and `*_generated_from_key=true` marks that cleanup was applied. For example, `Rixikars_Maw` becomes `name="Rixikars Maw"` with `name_raw="Rixikars_Maw"` and `name_generated_from_key=true`.
+
+These markers are diagnostics only. They are not final localisation and should not be treated as translated display text.
 
 ## ID and Reference Types
 
@@ -237,9 +267,12 @@ This block is intentionally stable and dashboard-friendly for follow-up joins.
 Current warning payload:
 
 - `unresolved_references`: array of objects with:
-  - `kind` (for example `planet`, `leader`, `species`, `fleet`, `army`)
+  - `kind` (for example `planet`, `leader`, `species`, `fleet`, `army`, or `unresolved_name`)
   - `id`
   - `context` (source field path in export logic)
+  - optional `value` for unresolved display-name diagnostics
+
+Generated-key fallback cleanup does not emit `kind="unresolved_name"` warnings. Hard unresolved placeholders do.
 
 ## `validation`
 
@@ -249,6 +282,10 @@ Current top-level validation fields include:
 - `capital_in_colonies`
 - `unresolved_reference_count`
 - `warning_count`
+- `unresolved_name_count`: Total unresolved display-name fields detected in this country export.
+- `unresolved_name_kinds`: Counts grouped by broad display kind, such as `planet`, `species`, `country`, `country_adjective`, `leader`, `fleet`, `army_formation`, `system`, and `capital_planet`.
+- `generated_name_key_count`: Total readable generated-key display fields cleaned into fallback names.
+- `generated_name_key_kinds`: Counts grouped by the same broad display kinds for cleaned generated keys.
 - `colonies_missing_systems`
 - `systems_exported_count`
 - `colony_systems_exported_count`
@@ -315,3 +352,12 @@ Current top-level validation fields include:
 - Changed `capital_planet` from a full colony copy to a navigation stub.
 - Removed top-level `colonies[].system`; full system data lives in top-level `systems`.
 - Standardized JSON ID/reference values as strings, except numeric `coordinate.origin`.
+
+## PR 2 Name / Unresolved Localization Diagnostics
+
+- Added hard unresolved display-name detection for `$` templates, `%` placeholders, and generic all-uppercase localisation keys.
+- Added `*_unresolved=true` sibling markers for hard unresolved display fields such as names, adjectives, planet names, system names, and army formation names.
+- Added readable generated-key fallback cleanup with `*_raw` and `*_generated_from_key=true`.
+- Disambiguated unresolved `species_counts_by_name` keys with species IDs to avoid merging distinct species that share the same unresolved template.
+- Added `validation.unresolved_name_count`, `validation.unresolved_name_kinds`, `validation.generated_name_key_count`, and `validation.generated_name_key_kinds`.
+- Added unresolved display-name entries to `warnings.unresolved_references` with `kind="unresolved_name"` and a compact `value`.
