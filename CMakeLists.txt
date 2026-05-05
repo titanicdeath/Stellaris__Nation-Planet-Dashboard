@@ -11,7 +11,15 @@ add_executable(stellaris_parser
     parser-program-files/src/ast.cpp
     parser-program-files/src/cli.cpp
     parser-program-files/src/config.cpp
+    parser-program-files/src/country_colony_export.cpp
+    parser-program-files/src/country_demographics_export.cpp
     parser-program-files/src/country_export.cpp
+    parser-program-files/src/country_export_helpers.cpp
+    parser-program-files/src/country_finance_export.cpp
+    parser-program-files/src/country_leader_export.cpp
+    parser-program-files/src/country_map_export.cpp
+    parser-program-files/src/country_market_export.cpp
+    parser-program-files/src/country_military_export.cpp
     parser-program-files/src/game_indexes.cpp
     parser-program-files/src/json_writer.cpp
     parser-program-files/src/main.cpp
