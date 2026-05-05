@@ -1,6 +1,32 @@
 #include "config.hpp"
 #include "utils.hpp"
 
+std::string unquote_config_value(std::string value) {
+    value = trim(value);
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        std::string out;
+        bool escape = false;
+        for (size_t i = 1; i + 1 < value.size(); ++i) {
+            const char c = value[i];
+            if (escape) {
+                out.push_back(c);
+                escape = false;
+                continue;
+            }
+            if (c == '\\' && i + 2 < value.size()) {
+                const char next = value[i + 1];
+                if (next == '"' || next == '\\') {
+                    escape = true;
+                    continue;
+                }
+            }
+            out.push_back(c);
+        }
+        return out;
+    }
+    return value;
+}
+
 Settings load_settings(const fs::path& config_path) {
     Settings st;
     st.config_path = fs::absolute(config_path);
@@ -23,7 +49,7 @@ Settings load_settings(const fs::path& config_path) {
         const auto eq = t.find('=');
         if (eq == std::string::npos) continue;
         std::string key = lower_copy(trim(t.substr(0, eq)));
-        std::string val = trim(t.substr(eq + 1));
+        std::string val = unquote_config_value(t.substr(eq + 1));
         ini[section][key] = val;
     }
 
@@ -74,6 +100,13 @@ Settings load_settings(const fs::path& config_path) {
 
     st.parse_game_definitions = getb("game_definitions", "parse_game_definitions", false);
     st.include_definition_sources = getb("game_definitions", "include_definition_sources", true);
+
+    st.localization_enabled = getb("localization", "enabled", false);
+    st.localization_language = lower_copy(trim(get("localization", "language", "english")));
+    if (st.localization_language.empty()) st.localization_language = "english";
+    const std::string localisation_root_raw = get("localization", "localisation_root", get("localization", "localization_root", ""));
+    st.localisation_root = trim(localisation_root_raw).empty() ? fs::path{} : resolve_path(st.project_root, localisation_root_raw);
+    st.localization_include_mods = getb("localization", "include_mods", false);
 
     st.pretty_json = getb("output", "pretty_json", true);
     st.include_raw_ids = getb("output", "include_raw_ids", true);

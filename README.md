@@ -19,7 +19,7 @@ This version is aimed at the first practical milestone:
 - Resolve planet-owned IDs into self-contained structures where practical.
 - Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleet/ship/design data, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
 - Export the save `market` block as structured market state when present, including resource-index mapping, selected-country market activity, and compact galaxy-wide activity totals.
-- Mark unresolved display-name placeholders with diagnostic `*_unresolved` fields until full localisation parsing is implemented.
+- Optionally load English Stellaris localisation `.yml` files and mark display fields as localized, generated fallback, unresolved, literal, or raw.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
 ## Build requirements
@@ -52,8 +52,27 @@ Edit `settings.config`. The defaults are conservative:
 - Parse all non-autosave files in `save_files/`.
 - Parse only the player country.
 - Do not parse game definition files by default.
+- Do not load Stellaris localisation files by default.
 - Do not retain extracted `gamestate` by default.
 - Reparse automatically when `settings.config` changes.
+
+### Localization
+
+Localization is optional and disabled by default. When disabled, the exporter keeps the previous generated-name fallback behavior: readable generated keys are cleaned into display guesses with `*_raw` plus `*_generated_from_key=true`, and hard placeholders keep `*_unresolved=true`.
+
+Enable English localisation by pointing `localisation_root` at either the parent Stellaris `localisation` folder or the specific language folder:
+
+```ini
+[localization]
+enabled=true
+language="english"
+localisation_root="C:\Program Files (x86)\Steam\steamapps\common\Stellaris\localisation"
+include_mods=false
+```
+
+The current discovery path supports the modern game layout, including `localisation\english\*_l_english.yml`, `localisation\english\name_lists\*_l_english.yml`, and `localisation\english\random_names\*_l_english.yml`. It also works when `localisation_root` points directly at `localisation\english`. Both `localisation` and `localization` spellings are accepted for config and folder discovery.
+
+Milestone 6A supports direct key lookup only. It does not yet perform full `$VARIABLE$` or `%TEMPLATE%` substitution, and it intentionally defers broad trait/civic/ethic/job/building/component localization to later localization milestones.
 
 ### Manifest skip and targeted runs
 
@@ -113,7 +132,9 @@ When the save contains a `market` block, the parser emits a top-level `market` o
 
 JSON ID/reference values are strings throughout the dashboard schema. Object keys under top-level `systems`, `species`, and `leaders` are ID keys. `coordinate.origin` is the explicit exception and remains numeric because it belongs to coordinate data and may use the `4294967295` sentinel.
 
-Full Stellaris localisation from `localisation/*.yml` is not implemented yet. The exporter marks hard unresolved placeholders such as `$...$`, `%...%`, and generic all-uppercase localisation keys with sibling fields like `name_unresolved`, `adjective_unresolved`, `planet_name_unresolved`, `system_name_unresolved`, or `formation_name_unresolved`. Readable generated keys such as `Rixikars_Maw` or `LITHOID3_PLANET_Lonntoch` are cleaned into fallback display names and keep provenance with `*_raw` plus `*_generated_from_key`. `validation.unresolved_name_count` and `validation.unresolved_name_kinds` summarize hard placeholders; `validation.generated_name_key_count` and `validation.generated_name_key_kinds` summarize cleaned generated keys. `warnings.unresolved_references` includes compact `kind="unresolved_name"` entries only for hard unresolved placeholders.
+Display-name localization is metadata-preserving. If a direct key is found in configured localisation files, the display field is replaced and gets `*_raw`, `*_localized=true`, and `*_localization_status="localized"`. If no key is found but the value is a readable generated key, the previous cleanup fallback is used with `*_raw`, `*_generated_from_key=true`, and `*_localization_status="generated_from_key"`. Hard unresolved placeholders such as `$...$`, `%...%`, and generic all-uppercase localisation keys keep `*_unresolved=true` with `*_localization_status="unresolved"`. Literal save text gets `*_localization_status="literal"`; other unchanged tokens are `raw`.
+
+Each country JSON includes a top-level `localization` block with enabled/available status, language, entry and file counts when available, a small source-file sample, and field counters. Matching counters also appear under `validation`: `localized_field_count`, `generated_fallback_count`, `unresolved_localization_count`, `localization_entry_count`, `localization_file_count`, and `localization_warnings`.
 
 Leader names also use the structured save-side `name.full_names` block when available. Literal leader names use the `full_names.key` directly. Generated templates such as `%LEADER_2%` are expanded from variables `1` and `2`, with species/name-list prefixes such as `LITHOID3_CHR_` stripped, underscores converted to spaces, and hyphenated casing normalized; the raw template is preserved as `name_raw` with `name_generated_from_key=true`. Leader profile output now preserves gender, job, ethic, tier, experience, creator, planet, location, and council location when present. `birth_date` comes from the save `date` field, `date_added` and `recruitment_date` are preserved, and `service_start_date` prefers `date_added` before `recruitment_date`. `age_years` and `service_length_years` are calculated from the save game date; save-side `age` is kept as `raw_age` but is not treated as authoritative.
 
@@ -121,7 +142,7 @@ Leader names also use the structured save-side `name.full_names` block when avai
 
 ## Notes on game definitions
 
-`parse_game_definitions=true` currently builds a lightweight definition-source index from selected `common/` folders. It does not yet fully localize names/descriptions from `localisation/`; the emitted JSON still primarily uses save tokens such as `building_system_capital` or `district_generator`.
+`parse_game_definitions=true` currently builds a lightweight definition-source index from selected `common/` folders. Milestone 6A localisation is separate and only applies to high-value display fields; definition tokens such as traits, jobs, buildings, and components are still primarily emitted as save tokens until later localization milestones.
 
 ## Important implementation notes
 

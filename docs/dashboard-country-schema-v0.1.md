@@ -30,6 +30,7 @@ The folder keeps the dotted save date. The filename suffix uses `_YYYY-MM-DD`.
 - `demographics`: Empire-level census rollup derived from owned colonies.
 - `workforce_summary`: Empire-level job, workforce, and pop category rollups.
 - `leaders`: Referenced leader objects, keyed by leader ID.
+- `localization`: Optional localisation load/status metadata and per-export field counters.
 - `references`: Raw ID/reference support block for dashboard joins.
 - `warnings`: Structured warning payloads.
 - `debug`: Optional parser diagnostics when debug sections are enabled.
@@ -53,7 +54,7 @@ Contains country identity plus selected raw/evaluated fields. Common fields incl
 - `founder_species_ref`, `built_species_ref`
 - optional blocks (`flag`, `ethics`, `government`, etc.)
 
-Full localisation from Stellaris `localisation/*.yml` files is not implemented yet. Display fields may still contain save-side localisation keys or templates. When a display value looks unresolved, the exporter keeps the raw value and adds a sibling marker such as `name_unresolved=true` or `adjective_unresolved=true`.
+When configured, direct display-name keys are resolved from Stellaris localisation `.yml` files. Localisation is disabled by default, so existing generated-key fallback behavior remains available without requiring a game install path. Processed display fields include `*_localization_status`, with values `localized`, `generated_from_key`, `unresolved`, `literal`, or `raw`.
 
 ## `nat_finance_economy`
 
@@ -117,10 +118,10 @@ Each `market.resources.<resource>` entry contains:
 
 - `planet_id`
 - `name`
-- optional `name_unresolved`
+- optional `name_raw`, `name_localized`, `name_generated_from_key`, `name_unresolved`, and `name_localization_status`
 - `system_id`
 - `system_name`
-- optional `system_name_unresolved`
+- optional `system_name_raw`, `system_name_localized`, `system_name_generated_from_key`, `system_name_unresolved`, and `system_name_localization_status`
 
 The full capital colony data lives in `colonies[]`; consumers should join by `planet_id`.
 
@@ -179,7 +180,7 @@ Current system selection is conservative:
 
 Each `systems.<system_id>` entry emits:
 
-- `system_id`, `name`, `coordinate`, `star_class`, `type`, `sector` when available
+- `system_id`, `name`, display-name localization metadata, `coordinate`, `star_class`, `type`, `sector` when available
 - `planet_ids` from the galactic object
 - `colony_planet_ids`, `owned_planet_ids`, and `controlled_planet_ids` relevant to the selected country
 - `starbase_ids` from the system object when available
@@ -227,9 +228,54 @@ Leader lifecycle/profile fields are emitted when present or derivable:
 - `service_length_years` and `service_length_days`, calculated from `service_start_date` to `save.game_date`
 - `raw_age`, preserving save field `age`; values such as `age=0` are not trusted as authoritative
 
+## Localization
+
+Localization is optional and controlled by `[localization]` in `settings.config`. It is disabled by default. When enabled, the parser loads basic UTF-8/UTF-8-BOM Stellaris localisation files for the configured language, currently English-first.
+
+The loader discovers both modern language-subdirectory layouts and direct language roots:
+
+- `localisation_root=<Stellaris>\localisation`, then recursively scans `localisation\english\*_l_english.yml`
+- `localisation_root=<Stellaris>\localisation\english`, then recursively scans that folder
+- `localisation` and `localization` spellings are both supported
+
+Only direct key/value lookup is implemented in Milestone 6A. Full `$VARIABLE$` and `%TEMPLATE%` substitution is deferred, and broad trait/civic/ethic/job/building/component localization is intentionally out of scope.
+
+For each processed high-value display field:
+
+- `localized`: key was found in localisation files. The exporter writes the localized display value, `*_raw`, `*_localized=true`, and `*_localization_status="localized"`.
+- `generated_from_key`: key was not found but the existing readable fallback could clean it. The exporter writes the fallback display value, `*_raw`, `*_generated_from_key=true`, and `*_localization_status="generated_from_key"`.
+- `unresolved`: the value still contains `$`/`%` or is a hard unresolved template/key. The exporter preserves the raw display value, writes `*_unresolved=true`, and sets `*_localization_status="unresolved"`.
+- `literal`: the save value already appears to be literal display text.
+- `raw`: unchanged token that was neither localized nor safely generated.
+
+Readable generated keys such as `LITHOID3_PLANET_Lonntoch`, `SPEC_Magonid_planet`, or `Rixikars_Maw` remain metadata-preserving fallbacks, not true localisation. `*_localized=true` is emitted only when a value came from localisation files.
+
+The top-level `localization` block summarizes loader and field status:
+
+```json
+"localization": {
+  "enabled": true,
+  "available": true,
+  "language": "english",
+  "entry_count": 123456,
+  "source_file_count": 184,
+  "source_files_sample": [
+    "l_english.yml",
+    "species_names_l_english.yml"
+  ],
+  "localized_field_count": 42,
+  "generated_fallback_count": 17,
+  "unresolved_field_count": 1
+}
+```
+
+When disabled, `enabled=false`, `available=false`, and `reason="disabled"` are emitted. If enabled but no usable files can be loaded, `available=false` and `reason` explains the failure while export continues with generated-key fallback.
+
+Warnings remain compact. Missing localisation keys for important display fields can appear as `kind="localization_missing_key"`; hard placeholders continue to use `kind="unresolved_name"`.
+
 ## Unresolved Localisation Diagnostics
 
-This milestone does not resolve full Stellaris localisation. Instead, it separates hard unresolved placeholders from readable generated keys.
+Unresolved diagnostics separate hard unresolved placeholders from readable generated keys.
 
 Hard unresolved placeholders include:
 
@@ -375,6 +421,12 @@ Current top-level validation fields include:
 - `unresolved_name_kinds`: Counts grouped by broad display kind, such as `planet`, `species`, `country`, `country_adjective`, `leader`, `fleet`, `army_formation`, `system`, and `capital_planet`.
 - `generated_name_key_count`: Total readable generated-key display fields cleaned into fallback names.
 - `generated_name_key_kinds`: Counts grouped by the same broad display kinds for cleaned generated keys.
+- `localized_field_count`: Number of processed display fields resolved from localisation files.
+- `generated_fallback_count`: Number of processed display fields that used generated-key fallback after localisation lookup did not resolve them.
+- `unresolved_localization_count`: Number of processed display fields still unresolved after localisation lookup/fallback.
+- `localization_entry_count`: Number of loaded localisation dictionary entries for this run.
+- `localization_file_count`: Number of localisation source files loaded for this run.
+- `localization_warnings`: Compact count of localisation loader and important missing-key warnings.
 - `leader_count`: Number of top-level leader objects exported.
 - `leaders_with_generated_names`: Number of top-level leaders with `name_generated_from_key=true`.
 - `leaders_missing_names`: Number of top-level leaders where no usable name could be produced after fallbacks.
@@ -482,3 +534,11 @@ Current top-level validation fields include:
 - Added leader profile fields for gender, tier, experience, job, ethic, creator, planet, location, and council location.
 - Added lifecycle fields: `birth_date`, `date_added`, `recruitment_date`, `service_start_date`, calculated `age_years`, calculated service length, and `raw_age`.
 - Added leader validation counters and build-time leader schema checks.
+
+## Milestone 6A Localization Foundation
+
+- Added optional English localisation loading from Stellaris `.yml` files, disabled by default.
+- Added direct key lookup for high-value display fields while preserving raw keys and generated fallback behavior.
+- Added `*_localized=true` and `*_localization_status` metadata for processed display fields.
+- Added top-level `localization` status and validation counters.
+- Deferred full template substitution and broad trait/civic/job/building/component localization to later localization milestones.

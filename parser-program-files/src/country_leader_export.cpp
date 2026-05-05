@@ -103,7 +103,9 @@ void write_leader_name(JsonWriter& j,
         j.key("name"); j.value(name.display);
         j.key("name_raw"); j.value(name.raw);
         j.key("name_generated_from_key"); j.value(true);
+        j.key("name_localization_status"); j.value("generated_from_key");
         if (diagnostics) diagnostics->generated_kinds["leader"]++;
+        if (diagnostics) diagnostics->generated_fallback_count++;
         if (leader_stats) leader_stats->leaders_with_generated_names++;
         return;
     }
@@ -115,20 +117,42 @@ void write_leader_name(JsonWriter& j,
         return;
     }
 
-    if (is_generated_name_key(name.display)) {
+    const LocalizedText localized = localize_display_name(name.display, "leaders[].name", diagnostics ? diagnostics->localization : nullptr);
+    if (localized.status == "localized") {
+        j.key("name"); j.value(localized.display);
+        j.key("name_raw"); j.value(localized.raw);
+        j.key("name_localized"); j.value(true);
+        j.key("name_localization_status"); j.value("localized");
+        if (diagnostics) diagnostics->localized_field_count++;
+        return;
+    }
+
+    if (localized.status == "generated_from_key") {
         const std::string cleaned = make_leader_name_part_from_key(name.display);
         j.key("name"); j.value(cleaned.empty() ? name.display : cleaned);
         j.key("name_raw"); j.value(name.display);
         j.key("name_generated_from_key"); j.value(true);
+        j.key("name_localization_status"); j.value("generated_from_key");
         if (diagnostics) diagnostics->generated_kinds["leader"]++;
+        if (diagnostics) {
+            diagnostics->generated_fallback_count++;
+            diagnostics->add_localization_missing_key(id, "leaders[].name", name.display);
+        }
         if (leader_stats) leader_stats->leaders_with_generated_names++;
         return;
     }
 
-    j.key("name"); j.value(name.display);
-    if (name.unresolved || is_hard_unresolved_name(name.display)) {
+    j.key("name"); j.value(localized.display);
+    if (localized.status == "literal" || localized.status == "raw") {
+        j.key("name_localization_status"); j.value(localized.status);
+    }
+    if (name.unresolved || localized.status == "unresolved" || is_hard_unresolved_name(name.display)) {
         j.key("name_unresolved"); j.value(true);
-        if (diagnostics) diagnostics->add_unresolved("leader", id, "leaders[].name", name.display);
+        j.key("name_localization_status"); j.value("unresolved");
+        if (diagnostics) {
+            diagnostics->unresolved_localization_count++;
+            diagnostics->add_unresolved("leader", id, "leaders[].name", name.display);
+        }
     }
 }
 

@@ -3,6 +3,7 @@
 #include "ast.hpp"
 #include "config.hpp"
 #include "game_indexes.hpp"
+#include "localization.hpp"
 #include "timeline_export.hpp"
 
 struct UnresolvedReference {
@@ -34,4 +35,5 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
                                  const PdxValue* country,
                                  const SaveIndexes& ix,
                                  const Settings& st,
-                                 const DefinitionIndex* defs);
+                                 const DefinitionIndex* defs,
+                                 const LocalizationDb* localization_db = nullptr);

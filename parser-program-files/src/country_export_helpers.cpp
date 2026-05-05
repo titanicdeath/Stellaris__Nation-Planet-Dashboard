@@ -139,28 +139,56 @@ void write_display_text(JsonWriter& j,
                         const std::string& kind,
                         const std::string& id,
                         const std::string& context) {
-    if (is_hard_unresolved_name(value)) {
+    const LocalizedText text = localize_display_name(value, context, diagnostics ? diagnostics->localization : nullptr);
+
+    if (text.status == "localized") {
         j.key(field);
-        j.value(value);
-        j.key(unresolved_field);
+        j.value(text.display);
+        j.key(field + "_raw");
+        j.value(text.raw);
+        j.key(field + "_localized");
         j.value(true);
-        if (diagnostics) diagnostics->add_unresolved(kind, id, context, value);
+        j.key(field + "_localization_status");
+        j.value(text.status);
+        if (diagnostics) diagnostics->localized_field_count++;
         return;
     }
 
-    if (is_generated_name_key(value)) {
-        j.key(field + "_raw");
-        j.value(value);
+    if (text.status == "unresolved") {
         j.key(field);
-        j.value(make_display_name_from_key(value));
+        j.value(text.display);
+        j.key(unresolved_field);
+        j.value(true);
+        j.key(field + "_localization_status");
+        j.value(text.status);
+        if (diagnostics) {
+            diagnostics->unresolved_localization_count++;
+            diagnostics->add_unresolved(kind, id, context, text.display);
+        }
+        return;
+    }
+
+    if (text.status == "generated_from_key") {
+        j.key(field + "_raw");
+        j.value(text.raw);
+        j.key(field);
+        j.value(text.display);
         j.key(field + "_generated_from_key");
         j.value(true);
-        if (diagnostics) diagnostics->add_generated(kind, value);
+        j.key(field + "_localization_status");
+        j.value(text.status);
+        if (diagnostics) {
+            diagnostics->generated_fallback_count++;
+            diagnostics->add_generated(kind, text.raw);
+            diagnostics->add_localization_missing_key(id, context, text.raw);
+        }
         return;
     }
 
     j.key(field);
-    j.value(value);
+    j.value(text.display);
+    j.key(field + "_localization_status");
+    j.value(text.status);
 }
 
 void write_name_text(JsonWriter& j,

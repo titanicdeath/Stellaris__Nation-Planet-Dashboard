@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "country_export.hpp"
 #include "game_indexes.hpp"
+#include "localization.hpp"
 #include "manifest.hpp"
 #include "pdx_parser.hpp"
 #include "performance.hpp"
@@ -47,6 +48,16 @@ int main(int argc, char** argv) {
             defs_storage = build_definition_index(st);
             defs = &*defs_storage;
             std::cout << "Indexed " << defs->by_token.size() << " definition tokens.\n";
+        }
+
+        LocalizationDb localization_db = load_localization_db(st);
+        if (localization_db.enabled) {
+            if (localization_db.available) {
+                std::cout << "Loaded " << localization_db.entry_count << " " << localization_db.language
+                          << " localization entries from " << localization_db.source_files.size() << " files.\n";
+            } else {
+                std::cout << "[warn] Localization unavailable: " << localization_db.reason << "\n";
+            }
         }
 
         auto manifest = load_manifest(st.manifest_path);
@@ -145,7 +156,7 @@ int main(int argc, char** argv) {
                 std::string cname = get_country_name(it->second);
                 fs::path out_file = date_dir / (cid + "-(" + sanitize_filename(cname) + ")_" + output_date_suffix(game_date) + ".json");
                 const auto country_export_start = std::chrono::steady_clock::now();
-                auto result = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs);
+                auto result = write_country_output(out_file, save_path.filename().string(), game_date, cid, it->second, ix, st, defs, &localization_db);
                 const double country_export_seconds = elapsed_seconds_since(country_export_start);
                 CountryExportSummary s = result.first;
                 TimelinePoint tp = result.second;

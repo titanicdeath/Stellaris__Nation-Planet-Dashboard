@@ -2,12 +2,18 @@
 
 #include "country_export.hpp"
 #include "json_writer.hpp"
+#include "localization.hpp"
 #include "utils.hpp"
 
 struct NameDiagnostics {
     std::map<std::string, size_t> unresolved_kinds;
     std::map<std::string, size_t> generated_kinds;
     std::vector<UnresolvedReference>* warnings = nullptr;
+    const LocalizationDb* localization = nullptr;
+    size_t localized_field_count = 0;
+    size_t generated_fallback_count = 0;
+    size_t unresolved_localization_count = 0;
+    size_t localization_missing_key_warnings = 0;
 
     size_t unresolved_count() const {
         size_t total = 0;
@@ -30,6 +36,12 @@ struct NameDiagnostics {
     void add_generated(const std::string& kind, const std::string& value) {
         if (value.empty() || !is_generated_name_key(value)) return;
         generated_kinds[kind]++;
+    }
+
+    void add_localization_missing_key(const std::string& id, const std::string& context, const std::string& value) {
+        if (!localization || !localization->available || value.empty()) return;
+        if (warnings) warnings->push_back(UnresolvedReference{"localization_missing_key", id, context, value});
+        localization_missing_key_warnings++;
     }
 };
 

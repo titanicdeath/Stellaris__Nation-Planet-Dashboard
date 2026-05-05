@@ -54,11 +54,12 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
                                  const PdxValue* country,
                                  const SaveIndexes& ix,
                                  const Settings& st,
-                                 const DefinitionIndex* defs) {
+                                 const DefinitionIndex* defs,
+                                 const LocalizationDb* localization_db) {
     CountryExportSummary summary;
     TimelinePoint timeline;
     summary.country_id = country_id;
-    summary.country_name = get_country_name(country);
+    summary.country_name = localize_display_name(get_country_name(country), "country.name", localization_db).display;
     summary.output_file = out_path;
     timeline.country_id = country_id;
     timeline.country_name = summary.country_name;
@@ -74,6 +75,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     std::vector<UnresolvedReference> unresolved_refs;
     NameDiagnostics name_diagnostics;
     name_diagnostics.warnings = &unresolved_refs;
+    name_diagnostics.localization = localization_db;
     LeaderExportStats leader_stats;
     MarketExportStats market_stats;
 
@@ -157,7 +159,7 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
 
     auto capital_it = ix.planets.find(capital_id);
     if (!capital_id.empty() && capital_it != ix.planets.end()) {
-        summary.capital_name = localized_name(child(capital_it->second, "name"));
+        summary.capital_name = localize_display_name(localized_name(child(capital_it->second, "name")), "capital_planet.name", localization_db).display;
         write_capital_planet_stub(j, capital_id, capital_it->second, map_context, ix, &name_diagnostics);
     } else {
         if (!capital_id.empty()) add_unresolved("planet", capital_id, "country.capital");
@@ -308,6 +310,12 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.key("unresolved_name_kinds"); write_unresolved_name_kinds(j, name_diagnostics);
     j.key("generated_name_key_count"); j.raw_number(std::to_string(name_diagnostics.generated_count()));
     j.key("generated_name_key_kinds"); write_generated_name_key_kinds(j, name_diagnostics);
+    j.key("localized_field_count"); j.raw_number(std::to_string(name_diagnostics.localized_field_count));
+    j.key("generated_fallback_count"); j.raw_number(std::to_string(name_diagnostics.generated_fallback_count));
+    j.key("unresolved_localization_count"); j.raw_number(std::to_string(name_diagnostics.unresolved_localization_count));
+    j.key("localization_entry_count"); j.raw_number(std::to_string(localization_db ? localization_db->entry_count : 0));
+    j.key("localization_file_count"); j.raw_number(std::to_string(localization_db ? localization_db->source_files.size() : 0));
+    j.key("localization_warnings"); j.raw_number(std::to_string((localization_db ? localization_db->warning_count : 0) + name_diagnostics.localization_missing_key_warnings));
     j.key("leader_count"); j.raw_number(std::to_string(leader_stats.leader_count));
     j.key("leaders_with_generated_names"); j.raw_number(std::to_string(leader_stats.leaders_with_generated_names));
     j.key("leaders_missing_names"); j.raw_number(std::to_string(leader_stats.leaders_missing_names));
@@ -329,6 +337,13 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.end_object();
     j.end_object();
 
+    j.key("localization");
+    write_localization_status_block(j,
+                                    localization_db,
+                                    name_diagnostics.localized_field_count,
+                                    name_diagnostics.generated_fallback_count,
+                                    name_diagnostics.unresolved_localization_count);
+
     j.key("validation");
     j.begin_object();
     j.key("owned_planets_match_exported_colonies"); j.value(summary.owned_planets == summary.exported_colonies);
@@ -339,6 +354,12 @@ std::pair<CountryExportSummary, TimelinePoint> write_country_output(const fs::pa
     j.key("unresolved_name_kinds"); write_unresolved_name_kinds(j, name_diagnostics);
     j.key("generated_name_key_count"); j.raw_number(std::to_string(name_diagnostics.generated_count()));
     j.key("generated_name_key_kinds"); write_generated_name_key_kinds(j, name_diagnostics);
+    j.key("localized_field_count"); j.raw_number(std::to_string(name_diagnostics.localized_field_count));
+    j.key("generated_fallback_count"); j.raw_number(std::to_string(name_diagnostics.generated_fallback_count));
+    j.key("unresolved_localization_count"); j.raw_number(std::to_string(name_diagnostics.unresolved_localization_count));
+    j.key("localization_entry_count"); j.raw_number(std::to_string(localization_db ? localization_db->entry_count : 0));
+    j.key("localization_file_count"); j.raw_number(std::to_string(localization_db ? localization_db->source_files.size() : 0));
+    j.key("localization_warnings"); j.raw_number(std::to_string((localization_db ? localization_db->warning_count : 0) + name_diagnostics.localization_missing_key_warnings));
     j.key("leader_count"); j.raw_number(std::to_string(leader_stats.leader_count));
     j.key("leaders_with_generated_names"); j.raw_number(std::to_string(leader_stats.leaders_with_generated_names));
     j.key("leaders_missing_names"); j.raw_number(std::to_string(leader_stats.leaders_missing_names));

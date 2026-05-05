@@ -42,6 +42,11 @@ struct Settings {
     bool parse_game_definitions = false;
     bool include_definition_sources = true;
 
+    bool localization_enabled = false;
+    std::string localization_language = "english";
+    fs::path localisation_root;
+    bool localization_include_mods = false;
+
     bool pretty_json = true;
     bool include_raw_ids = true;
     bool include_debug_sections = true;

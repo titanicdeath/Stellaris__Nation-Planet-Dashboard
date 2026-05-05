@@ -22,6 +22,7 @@ add_executable(stellaris_parser
     parser-program-files/src/country_military_export.cpp
     parser-program-files/src/game_indexes.cpp
     parser-program-files/src/json_writer.cpp
+    parser-program-files/src/localization.cpp
     parser-program-files/src/main.cpp
     parser-program-files/src/manifest.cpp
     parser-program-files/src/pdx_parser.cpp

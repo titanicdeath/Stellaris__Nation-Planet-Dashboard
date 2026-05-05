@@ -133,18 +133,34 @@ void write_ship_display_name(JsonWriter& j,
                              const std::string& ship_id) {
     const std::string raw = localized_name(name_node);
     const std::string display = expanded_localized_name(name_node);
+    const LocalizedText localized = localize_display_name(raw, "fleets[].ships[].name", diagnostics ? diagnostics->localization : nullptr);
+    if (localized.status == "localized") {
+        j.key("name"); j.value(localized.display);
+        j.key("name_raw"); j.value(localized.raw);
+        j.key("name_localized"); j.value(true);
+        j.key("name_localization_status"); j.value("localized");
+        if (diagnostics) diagnostics->localized_field_count++;
+        return;
+    }
     if (raw == "SUFFIX_NAME_FORMAT") {
         j.key("name_raw"); j.value(raw);
         j.key("name"); j.value(display);
         j.key("name_generated_from_key"); j.value(true);
+        j.key("name_localization_status"); j.value("generated_from_key");
         if (diagnostics) diagnostics->generated_kinds["ship"]++;
+        if (diagnostics) diagnostics->generated_fallback_count++;
         return;
     }
     if (is_generated_name_key(raw)) {
         j.key("name_raw"); j.value(raw);
         j.key("name"); j.value(generated_key_display_name(raw));
         j.key("name_generated_from_key"); j.value(true);
+        j.key("name_localization_status"); j.value("generated_from_key");
         if (diagnostics) diagnostics->add_generated("ship", raw);
+        if (diagnostics) {
+            diagnostics->generated_fallback_count++;
+            diagnostics->add_localization_missing_key(ship_id, "fleets[].ships[].name", raw);
+        }
         return;
     }
     write_name_text(j, display, diagnostics, "ship", ship_id, "fleets[].ships[].name");
@@ -155,11 +171,25 @@ void write_design_display_name(JsonWriter& j,
                                NameDiagnostics* diagnostics,
                                const std::string& design_id) {
     const std::string raw = localized_name(name_node);
+    const LocalizedText localized = localize_display_name(raw, "ship_designs[].name", diagnostics ? diagnostics->localization : nullptr);
+    if (localized.status == "localized") {
+        j.key("name"); j.value(localized.display);
+        j.key("name_raw"); j.value(localized.raw);
+        j.key("name_localized"); j.value(true);
+        j.key("name_localization_status"); j.value("localized");
+        if (diagnostics) diagnostics->localized_field_count++;
+        return;
+    }
     if (is_generated_name_key(raw)) {
         j.key("name_raw"); j.value(raw);
         j.key("name"); j.value(generated_key_display_name(raw));
         j.key("name_generated_from_key"); j.value(true);
+        j.key("name_localization_status"); j.value("generated_from_key");
         if (diagnostics) diagnostics->add_generated("ship_design", raw);
+        if (diagnostics) {
+            diagnostics->generated_fallback_count++;
+            diagnostics->add_localization_missing_key(design_id, "ship_designs[].name", raw);
+        }
         return;
     }
     write_name_text(j, raw, diagnostics, "ship_design", design_id, "ship_designs[].name");
