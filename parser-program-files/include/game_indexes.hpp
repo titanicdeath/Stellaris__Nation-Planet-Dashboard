@@ -32,6 +32,7 @@ struct SaveIndexes {
     std::unordered_map<std::string, const PdxValue*> armies;
     std::unordered_map<std::string, const PdxValue*> fleets;
     std::unordered_map<std::string, const PdxValue*> ships;
+    std::unordered_map<std::string, const PdxValue*> ship_designs;
     std::unordered_map<std::string, const PdxValue*> sectors;
     std::unordered_map<std::string, const PdxValue*> construction_queues;
     std::unordered_map<std::string, const PdxValue*> construction_items;

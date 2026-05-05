@@ -74,6 +74,7 @@ SaveIndexes build_indexes(const PdxValue* root) {
     ix.armies = index_numeric_children(child(root, "army"));
     ix.fleets = index_numeric_children(child(root, "fleet"));
     ix.ships = index_numeric_children(child(root, "ships"));
+    ix.ship_designs = index_numeric_children(child(root, "ship_design"));
     ix.sectors = index_numeric_children(child(root, "sectors"));
 
     const PdxValue* planet_parent = nested_child(root, {"planets", "planet"});

@@ -284,7 +284,8 @@ function Test-GeneratedDisplayNameField {
         throw "${Path}.${RawField} must be a non-empty string"
     }
 
-    if (Test-IsHardUnresolvedDisplayName $rawValue) {
+    $allowedGeneratedFormatKeys = @("SUFFIX_NAME_FORMAT")
+    if ((Test-IsHardUnresolvedDisplayName $rawValue) -and ($allowedGeneratedFormatKeys -notcontains $rawValue)) {
         throw "${Path}.${RawField} contains hard unresolved placeholder '$rawValue' but is marked as generated fallback"
     }
 }
@@ -586,6 +587,186 @@ function Test-CountryJsonTree {
     }
 }
 
+function Test-DashboardFleetSchema {
+    param(
+        [object]$Json,
+        [string]$Path
+    )
+
+    if (-not (Has-JsonProperty $Json "fleets")) {
+        throw "$Path is missing top-level fleets"
+    }
+
+    if ($null -eq $Json.fleets -or $Json.fleets -isnot [System.Array]) {
+        throw "$Path fleets must be a JSON array"
+    }
+
+    if (-not (Has-JsonProperty $Json "ship_designs")) {
+        throw "$Path is missing top-level ship_designs"
+    }
+
+    if ($null -eq $Json.ship_designs -or $Json.ship_designs -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path ship_designs must be a JSON object"
+    }
+
+    if (-not (Has-JsonProperty $Json.validation "unresolved_ship_references")) {
+        throw "$Path is missing validation.unresolved_ship_references"
+    }
+
+    $fleetLeakNeedles = @(
+        "starbase",
+        "science ship",
+        "science_ship",
+        "construction ship",
+        "construction_ship",
+        "mining station",
+        "mining_station",
+        "research station",
+        "research_station",
+        "constructor"
+    )
+
+    $summaryShipTotal = 0
+    $hasAllFleetSummaries = $true
+    $referencedDesignIds = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    for ($fleetIndex = 0; $fleetIndex -lt $Json.fleets.Count; $fleetIndex++) {
+        $fleet = $Json.fleets[$fleetIndex]
+        $fleetPath = "$Path.fleets[$fleetIndex]"
+
+        if ($fleet -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$fleetPath must be an object"
+        }
+
+        if (-not (Has-JsonProperty $fleet "fleet_id") -or $fleet.fleet_id -isnot [string]) {
+            throw "$fleetPath.fleet_id must be a string"
+        }
+
+        if ((Has-JsonProperty $fleet "owner") -and $null -ne $fleet.owner -and $fleet.owner -isnot [string]) {
+            throw "$fleetPath.owner must be a string or null"
+        }
+
+        foreach ($candidate in @($fleet.name) + @($fleet.ship_class) + @($fleet.ship_classes)) {
+            if ($null -eq $candidate) {
+                continue
+            }
+            $text = ([string]$candidate).ToLowerInvariant()
+            foreach ($needle in $fleetLeakNeedles) {
+                if ($text.Contains($needle)) {
+                    throw "$fleetPath appears to contain a non-military fleet/station marker: $candidate"
+                }
+            }
+        }
+
+        if (-not (Has-JsonProperty $fleet "ships") -or $null -eq $fleet.ships -or $fleet.ships -isnot [System.Array]) {
+            throw "$fleetPath.ships must be a JSON array"
+        }
+
+        for ($shipIndex = 0; $shipIndex -lt $fleet.ships.Count; $shipIndex++) {
+            $ship = $fleet.ships[$shipIndex]
+            $shipPath = "$fleetPath.ships[$shipIndex]"
+
+            if ($ship -is [string] -or $ship -is [int] -or $ship -is [long] -or $ship -is [double]) {
+                throw "$shipPath is a bare ship ID; expected a ship object"
+            }
+
+            if ($ship -isnot [System.Management.Automation.PSCustomObject]) {
+                throw "$shipPath must be a ship object"
+            }
+
+            if (-not (Has-JsonProperty $ship "ship_id") -or $ship.ship_id -isnot [string]) {
+                throw "$shipPath.ship_id must be a string"
+            }
+
+            foreach ($idField in @("design_id", "upgrade_design_id", "leader_id", "fleet_id")) {
+                if ((Has-JsonProperty $ship $idField) -and $null -ne $ship.PSObject.Properties[$idField].Value -and
+                    $ship.PSObject.Properties[$idField].Value -isnot [string]) {
+                    throw "$shipPath.$idField must be a string when present"
+                }
+            }
+
+            foreach ($candidate in @($ship.ship_class) + @($ship.ship_size)) {
+                if ($null -eq $candidate) {
+                    continue
+                }
+                $text = ([string]$candidate).ToLowerInvariant()
+                foreach ($needle in $fleetLeakNeedles) {
+                    if ($text.Contains($needle)) {
+                        throw "$shipPath appears to contain a non-military ship marker: $candidate"
+                    }
+                }
+            }
+
+            if ((Has-JsonProperty $ship "design_id") -and -not [string]::IsNullOrWhiteSpace([string]$ship.design_id)) {
+                [void]$referencedDesignIds.Add([string]$ship.design_id)
+            }
+        }
+
+        if (Has-JsonProperty $fleet "summary") {
+            if ((Has-JsonProperty $fleet.summary "ship_count") -and [int]$fleet.summary.ship_count -ne $fleet.ships.Count) {
+                throw "$fleetPath.summary.ship_count must equal fleets[$fleetIndex].ships.Count"
+            }
+
+            if ((Has-JsonProperty $fleet.summary "ship_count") -and
+                (Has-JsonProperty $fleet.summary "resolved_ship_count") -and
+                (Has-JsonProperty $fleet.summary "unresolved_ship_count") -and
+                ([int]$fleet.summary.resolved_ship_count + [int]$fleet.summary.unresolved_ship_count -ne [int]$fleet.summary.ship_count)) {
+                throw "$fleetPath.summary resolved/unresolved counts do not add up to ship_count"
+            }
+
+            if (Has-JsonProperty $fleet.summary "ship_count") {
+                $summaryShipTotal += [int]$fleet.summary.ship_count
+            } else {
+                $hasAllFleetSummaries = $false
+            }
+        } else {
+            $hasAllFleetSummaries = $false
+        }
+    }
+
+    if ($hasAllFleetSummaries -and (Has-JsonProperty $Json.validation "ship_count") -and [int]$Json.validation.ship_count -ne $summaryShipTotal) {
+        throw "$Path validation.ship_count must equal the sum of fleet.summary.ship_count"
+    }
+
+    if ($referencedDesignIds.Count -gt 0 -and $Json.ship_designs.PSObject.Properties.Count -eq 0) {
+        throw "$Path ship_designs must be populated when resolved ship design IDs are present"
+    }
+
+    foreach ($designId in $referencedDesignIds) {
+        if (-not (Has-JsonProperty $Json.ship_designs $designId)) {
+            throw "$Path ship design $designId is referenced by a fleet ship but missing from top-level ship_designs"
+        }
+    }
+
+    foreach ($designProperty in $Json.ship_designs.PSObject.Properties) {
+        $design = $designProperty.Value
+        $designPath = "$Path.ship_designs.$($designProperty.Name)"
+
+        if ($design -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$designPath must be an object"
+        }
+
+        if (-not (Has-JsonProperty $design "design_id") -or $design.design_id -isnot [string]) {
+            throw "$designPath.design_id must be a string"
+        }
+
+        if ((Has-JsonProperty $design "sections")) {
+            foreach ($section in @($design.sections)) {
+                if ((Has-JsonProperty $section "components")) {
+                    foreach ($component in @($section.components)) {
+                        if (-not (Has-JsonProperty $component "slot") -or [string]::IsNullOrWhiteSpace([string]$component.slot)) {
+                            throw "$designPath sections[].components[] is missing slot"
+                        }
+                        if (-not (Has-JsonProperty $component "template") -or [string]::IsNullOrWhiteSpace([string]$component.template)) {
+                            throw "$designPath sections[].components[] is missing template"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 function Test-GeneratedJson {
     $OutputDir = Join-Path $Root "output"
 
@@ -658,6 +839,7 @@ function Test-GeneratedJson {
         }
 
         Test-CountryJsonTree $json '$'
+        Test-DashboardFleetSchema $json $file.FullName
 
         if ($file.Name -notmatch '_\d{4}-\d{2}-\d{2}\.json$') {
             throw "$($file.FullName) must include a _YYYY-MM-DD suffix before .json"
@@ -677,6 +859,8 @@ function Test-GeneratedJson {
             "demographics",
             "workforce_summary",
             "systems",
+            "fleets",
+            "ship_designs",
             "army_formations"
         )) {
             if (-not (Has-JsonProperty $json $requiredTopLevel)) {
@@ -784,6 +968,15 @@ function Test-GeneratedJson {
             "non_military_fleet_records_suppressed",
             "defense_armies_suppressed",
             "army_formations_count",
+            "fleet_count",
+            "ship_count",
+            "resolved_ship_count",
+            "unresolved_ship_count",
+            "unresolved_ship_references",
+            "ship_design_count",
+            "resolved_design_count",
+            "unresolved_design_references",
+            "resource_value_available",
             "unresolved_name_count",
             "unresolved_name_kinds",
             "generated_name_key_count",
@@ -814,7 +1007,8 @@ function Test-GeneratedJson {
             throw "$($file.FullName) is missing workforce_summary.active_jobs_by_planet"
         }
 
-        if ($file.FullName -match '\\2220-12-16\\') {
+        $is2220Tetra = ($file.FullName -match '\\2220[.-]12[.-]16\\') -or ($file.Name -match '_2220-12-16\.json$')
+        if ($is2220Tetra) {
             if ((Has-JsonProperty $json.workforce_summary "job_counts_by_type") -and
                 (Has-JsonProperty $json.workforce_summary.job_counts_by_type "crisis_purge")) {
                 throw "$($file.FullName) still exposes crisis_purge in workforce_summary.job_counts_by_type"
@@ -854,6 +1048,18 @@ function Test-GeneratedJson {
 
             if ($countryMilitaryZero -and @($json.fleets).Count -ne 0) {
                 throw "$($file.FullName) has zero country military metrics but non-empty top-level fleets"
+            }
+
+            if (@($json.fleets).Count -ne 0) {
+                throw "$($file.FullName) 2220 Tetra must have fleets.Count = 0"
+            }
+
+            if (@($json.owned_armies).Count -ne 0) {
+                throw "$($file.FullName) 2220 Tetra must have owned_armies.Count = 0"
+            }
+
+            if (@($json.army_formations).Count -ne 0) {
+                throw "$($file.FullName) 2220 Tetra must have army_formations.Count = 0"
             }
         }
 

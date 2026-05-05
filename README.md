@@ -13,11 +13,11 @@ This version is aimed at the first practical milestone:
 - Extract the embedded `gamestate` in memory.
 - Optionally retain the extracted `gamestate` to disk for debugging.
 - Parse Paradox `key=value` / nested-brace syntax into a generic AST.
-- Build lookup indexes for countries, planets, species, leaders, buildings, districts, zones, deposits, pop groups, pop jobs, fleets, armies, systems, sectors, and construction queues.
+- Build lookup indexes for countries, planets, species, leaders, buildings, districts, zones, deposits, pop groups, pop jobs, fleets, ships, ship designs, armies, systems, sectors, and construction queues.
 - Select nations according to `settings.config`.
 - Emit one JSON file per selected nation under `output/<game-date>/`, with filenames ending in `_YYYY-MM-DD.json`.
 - Resolve planet-owned IDs into self-contained structures where practical.
-- Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleets, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
+- Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleet/ship/design data, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
 - Mark unresolved display-name placeholders with diagnostic `*_unresolved` fields until full localisation parsing is implemented.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
@@ -96,7 +96,11 @@ The first command cleans build/output and performs a full fresh validation. The 
 
 Job count summaries report active dashboard jobs only. Inactive/sentinel jobs are not part of the export contract: their records and names are not emitted in colony jobs, active job maps, derived summaries, workforce summaries, debug sections, or raw output paths. Suppressed jobs only increment the numeric `validation.inactive_job_records_suppressed` counter. `workforce_by_job_type` remains available for exportable jobs.
 
-Top-level `fleets` now contains military fleets only. Starbases, mining/research stations, science ships, constructors, civilian fleets, orbital stations, and zero-power records without military markers are suppressed from that array but remain available through system/map context when relevant.
+Top-level `fleets` contains military navy fleets only. Starbases, mining/research stations, science ships, constructors, civilian fleets, orbital stations, transport/army formations, and zero-power records without military markers are suppressed from that array. Transport and ground-force data belongs under `army_formations`, not navy fleets.
+
+Military data is exported in three layers: `fleets[]` for fleet-level facts, `fleets[].ships[]` for individual vessel records, and top-level `ship_designs` for the design templates referenced by exported ships. `fleets[].ships[]` entries are objects with string IDs, not bare ship IDs; unresolved ship references are emitted as `{ "ship_id": "...", "resolved": false }` stubs. Fleet summaries include ship counts, resolved/unresolved counts, hull/armor/shield totals when present, ship size/class/design composition, and component rollups derived from referenced design templates.
+
+`ship_designs` contains only designs referenced by exported ships. Design sections and component template tokens are included for dashboard inspection, but component/resource valuation is deliberately future-aware rather than hard-coded: `resource_cost.available=false` and fleet `estimated_resource_value.available=false` mean a component cost catalog has not been loaded yet.
 
 Defense armies are not part of the export contract and are filtered before top-level, colony/local, formation, debug, or raw output paths. Suppressed defense armies only increment `validation.defense_armies_suppressed`. Non-defense armies are grouped under `army_formations` by `fleet_name` when present, otherwise by planet and army type.
 

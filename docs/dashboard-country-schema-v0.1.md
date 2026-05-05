@@ -225,9 +225,34 @@ Current fields:
 
 Inactive/sentinel jobs are not part of the export contract. Their records and names are not emitted in detailed colony jobs, active job maps, derived summaries, workforce summaries, debug sections, or raw escape hatches. Suppressed jobs only affect `validation.inactive_job_records_suppressed`, a numeric total. Exportable jobs must have a type plus meaningful workforce or positive assigned pop group amounts. Legitimate `civilian` jobs are allowed when they are real occupied jobs.
 
-## `fleets` and `owned_armies`
+## `fleets`, `ship_designs`, and `owned_armies`
 
-`fleets` contains military fleets only. Fleet-like records are suppressed when they are marked `station=yes`, `orbital_station=yes`, or `civilian=yes`, when their direct or resolved ship class is `shipclass_starbase`, `shipclass_mining_station`, `shipclass_research_station`, `shipclass_science_ship`, or `shipclass_constructor`, or when they have zero military power and no clear military fleet markers. Starbase and system context remains available under `systems` and map summaries.
+`fleets` contains military navy fleets only. Fleet-like records are suppressed when they are marked `station=yes`, `orbital_station=yes`, or `civilian=yes`, when their direct or resolved ship class is `shipclass_starbase`, `shipclass_mining_station`, `shipclass_research_station`, `shipclass_science_ship`, `shipclass_constructor`, `shipclass_colonizer`, or a transport class, or when they have zero military power and no clear military fleet markers. Starbase and system context remains available under `systems` and map summaries. Transport and ground-force data belongs under `army_formations`, not navy fleets.
+
+The navy model has three layers:
+
+- `fleets[]`: Fleet-level dashboard facts such as `fleet_id`, `name`, optional `fleet_template_id`, `ship_class`, `military_power`, `diplomacy_weight`, `hit_points`, `weapon`, `mobile`, `valid_for_combat`, `ground_support_stance`, `ships`, and `summary`.
+- `fleets[].ships[]`: Individual ship objects. These entries are never bare IDs. Resolved ships can include `ship_id`, `fleet_id`, `name`, `name_raw`, `name_generated_from_key`, `ship_class`, `ship_size`, `design_id`, `upgrade_design_id`, `graphical_culture`, `experience`, `leader_id`, `construction_date`, `hull`/`max_hull`, `armor`/`max_armor`, `shields`/`max_shields`, and slim `sections[].weapons[]` data.
+- `ship_designs`: A top-level object keyed by design ID. It contains only designs referenced by exported ships, with `design_id`, generated-name diagnostics, `graphical_culture`, `ship_size`, design `sections[].components[]`, `required_components`, and `resource_cost`.
+
+Unresolved ship references become stubs:
+
+```json
+{ "ship_id": "123", "resolved": false }
+```
+
+Those stubs increment `validation.unresolved_ship_references` and add a warning with `kind="unresolved_ship_reference"`. Unresolved design IDs increment `validation.unresolved_design_references`; when referenced, they are represented as unresolved design entries in `ship_designs`.
+
+Fleet `summary` contains dashboard rollups derived from exported ship objects and referenced designs:
+
+- `ship_count`, `resolved_ship_count`, `unresolved_ship_count`
+- `ship_sizes`, `ship_classes`, `design_counts`
+- `component_counts`, `weapon_component_counts`, `utility_component_counts`
+- optional health totals such as `total_hull`, `total_max_hull`, `total_armor`, `total_max_armor`, `total_shields`, and `total_max_shields`
+- optional `average_experience`
+- `estimated_resource_value.available=false` until component cost catalog support exists
+
+This is slim dashboard military data, not a tactical combat export. Runtime movement/combat fields such as coordinates, rotations, targets, orders, paths, weapon cooldowns, and targeting state are not part of the fleet/ship/design contract.
 
 Defense armies are not part of the country JSON export contract. They are filtered before top-level army output, colony/local army lists, formations, and debug sections. Suppressed defense armies only affect `validation.defense_armies_suppressed`, a numeric total. Dashboard consumers should use `army_formations` for non-defense armies.
 
@@ -267,7 +292,7 @@ This block is intentionally stable and dashboard-friendly for follow-up joins.
 Current warning payload:
 
 - `unresolved_references`: array of objects with:
-  - `kind` (for example `planet`, `leader`, `species`, `fleet`, `army`, or `unresolved_name`)
+  - `kind` (for example `planet`, `leader`, `species`, `fleet`, `army`, `unresolved_ship_reference`, `unresolved_design_reference`, or `unresolved_name`)
   - `id`
   - `context` (source field path in export logic)
   - optional `value` for unresolved display-name diagnostics
@@ -301,6 +326,15 @@ Current top-level validation fields include:
 - `species_without_resolution`: species IDs present in colony census data but missing from `species_db`.
 - `inactive_job_records_suppressed`: Numeric total of inactive/sentinel pop job records filtered before export.
 - `non_military_fleet_records_suppressed`: Owned fleet-like records excluded from top-level military `fleets`.
+- `fleet_count`: Number of exported military fleets.
+- `ship_count`: Sum of exported `fleets[].ships[]` entries.
+- `resolved_ship_count`: Number of ship entries resolved through the ship index.
+- `unresolved_ship_count`: Number of unresolved ship stubs.
+- `unresolved_ship_references`: Number of fleet ship IDs missing from the ship index.
+- `ship_design_count`: Number of referenced design IDs emitted under `ship_designs`.
+- `resolved_design_count`: Number of referenced design IDs resolved through the design index.
+- `unresolved_design_references`: Number of ship design IDs missing from the design index.
+- `resource_value_available`: Whether component-cost/resource valuation is available; currently `false` unless future component catalog support is added.
 - `defense_armies_suppressed`: Numeric total of defense armies filtered before export.
 - `army_formations_count`: Number of grouped non-defense army formations exported.
 - `has_stored_resources`: Whether `nat_finance_economy.stored_resources` contains at least one named resource.
@@ -361,3 +395,12 @@ Current top-level validation fields include:
 - Disambiguated unresolved `species_counts_by_name` keys with species IDs to avoid merging distinct species that share the same unresolved template.
 - Added `validation.unresolved_name_count`, `validation.unresolved_name_kinds`, `validation.generated_name_key_count`, and `validation.generated_name_key_kinds`.
 - Added unresolved display-name entries to `warnings.unresolved_references` with `kind="unresolved_name"` and a compact `value`.
+
+## PR 3 Ship and Fleet Expansion
+
+- Added ship and ship-design indexing for military dashboard export.
+- Changed `fleets[].ships[]` from bare IDs to slim ship objects, with unresolved ship stubs when lookup fails.
+- Added fleet-level ship, health, design, and component rollups under `fleets[].summary`.
+- Added top-level `ship_designs` containing only designs referenced by exported ships.
+- Added top-level military and validation rollups for fleet, ship, design, and resource-value availability counts.
+- Kept non-military fleets, stations, civilian ships, transports, and defense armies suppressed from navy output.
