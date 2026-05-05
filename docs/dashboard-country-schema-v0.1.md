@@ -17,6 +17,7 @@ The folder keeps the dotted save date. The filename suffix uses `_YYYY-MM-DD`.
 - `save`: Save metadata (`file`, `game_date`, version/name when available).
 - `country`: Selected country data and metrics.
 - `nat_finance_economy`: The only top-level finance and stockpile block.
+- `market`: Structured save market state, emitted only when the save contains a `market` block.
 - `capital_planet`: Navigation stub for `country.capital`, or `null`.
 - `colonies`: Expanded array of owned planets (`country.owned_planets`).
 - `controlled_planet_ids`: Raw controlled planet IDs.
@@ -65,6 +66,50 @@ Full localisation from Stellaris `localisation/*.yml` files is not implemented y
 - `stored_resources`: Current stockpiled resources from the country standard economy module resources path.
 
 `stored_resources` appears only at `nat_finance_economy.stored_resources`. The old top-level `stored_resources`, top-level `economy`, `country.budget`, and `derived_summary.economy.stored_resources` locations are not emitted.
+
+## `market`
+
+`market` is emitted only when the save root contains a `market` block. It exports market state from the save, not final UI buy/sell prices.
+
+Top-level market fields include:
+
+- `enabled`: Boolean market enabled flag.
+- `galactic_market_country`: Save `market.country`, emitted as a string country ID.
+- `next_monthly_trade_item_id`: Numeric save counter when present.
+- `resource_order`: Resource names by market array index.
+- `resources`: Object keyed by mapped resource name.
+- `player_market_activity`: Bought/sold/net/internal activity for the exported country.
+- `all_country_market_activity_summary`: Compact galaxy-wide bought/sold/net totals by resource, plus a country activity count.
+- `price_derivation_status`: Always present while `market` exists.
+
+Known market array indices are mapped as:
+
+- `0`: `energy` (`basic`)
+- `1`: `minerals` (`basic`)
+- `2`: `food` (`basic`)
+- `9`: `consumer_goods` (`advanced`)
+- `10`: `alloys` (`advanced`)
+- `11`: `volatile_motes` (`strategic`)
+- `12`: `exotic_gases` (`strategic`)
+- `13`: `rare_crystals` (`strategic`)
+- `14`: `sr_living_metal` (`rare`)
+- `15`: `sr_zro` (`rare`)
+- `16`: `sr_dark_matter` (`rare`)
+
+Unknown indices are preserved as `unknown_N`; this mapping applies only to market arrays and does not rename stored resource keys elsewhere.
+
+Each `market.resources.<resource>` entry contains:
+
+- `index`, `resource`, `category`
+- `galactic_market_resource`: Boolean/null from `market.galactic_market_resources[index]`
+- `global_fluctuation`: Numeric/null from `market.fluctuations[index]`
+- `player_bought`, `player_sold`, `player_net_bought`
+- `player_internal_fluctuation`
+- `observed_buy_price`, `observed_sell_price`
+
+`player_market_activity.country_id` matches the exported country. If that country has no market activity in the save, its activity maps are empty and per-resource bought/sold/net values are zero. `internal_market_fluctuations` are copied only for the exported country.
+
+`observed_buy_price` and `observed_sell_price` remain `null` for this milestone. `price_derivation_status.available=false` with a reason explaining that buy/sell prices are not directly emitted in the save and derivation is deferred. Manually observed prices are useful future research data but are not hard-coded into the parser.
 
 ## `capital_planet` and `colonies`
 

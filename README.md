@@ -18,6 +18,7 @@ This version is aimed at the first practical milestone:
 - Emit one JSON file per selected nation under `output/<game-date>/`, with filenames ending in `_YYYY-MM-DD.json`.
 - Resolve planet-owned IDs into self-contained structures where practical.
 - Export dashboard hygiene fields: active job summaries, numeric suppression totals, military-only fleet/ship/design data, grouped non-defense army formations, and `nat_finance_economy` finance/stockpile data.
+- Export the save `market` block as structured market state when present, including resource-index mapping, selected-country market activity, and compact galaxy-wide activity totals.
 - Mark unresolved display-name placeholders with diagnostic `*_unresolved` fields until full localisation parsing is implemented.
 - Maintain a metadata-first manifest so unchanged saves/settings are skipped before `.sav` extraction and PDX parsing.
 
@@ -105,6 +106,8 @@ Military data is exported in three layers: `fleets[]` for fleet-level facts, `fl
 Defense armies are not part of the export contract and are filtered before top-level, colony/local, formation, debug, or raw output paths. Suppressed defense armies only increment `validation.defense_armies_suppressed`. Non-defense armies are grouped under `army_formations` by `fleet_name` when present, otherwise by planet and army type.
 
 Country finance data is exposed only under top-level `nat_finance_economy`. Its `budget` uses the current-month income, expenses, and balance breakdown; `net_monthly_resource` is derived by summing current-month balance categories by resource; and `stored_resources` is the only stockpile location. The old top-level `economy`, top-level `stored_resources`, `country.budget`, and `derived_summary.economy.stored_resources` locations are not emitted.
+
+When the save contains a `market` block, the parser emits a top-level `market` object. This is a market-state export, not final Stellaris UI buy/sell price derivation. Market arrays are mapped by resource index where known: `energy`, `minerals`, `food`, `consumer_goods`, `alloys`, `volatile_motes`, `exotic_gases`, `rare_crystals`, `sr_living_metal`, `sr_zro`, and `sr_dark_matter`; unknown indices are preserved as `unknown_N`. `market.player_market_activity` is specific to the exported country JSON, while `market.all_country_market_activity_summary` compactly aggregates bought/sold/net totals across countries. `observed_buy_price` and `observed_sell_price` remain `null`, and `price_derivation_status.available=false`, until a reliable price formula or component/catalog input is implemented. Manually observed UI prices are deliberately not hard-coded.
 
 `capital_planet` is a navigation stub with `planet_id`, `name`, `system_id`, and `system_name`; the full capital colony record lives in `colonies[]`. Colonies no longer embed a top-level `system` object; use `derived_summary.system_id` or `derived_summary.map.system_id` to join to top-level `systems`.
 

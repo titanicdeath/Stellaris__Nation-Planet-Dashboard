@@ -403,6 +403,10 @@ function Test-JsonIdReferenceShape {
         return
     }
 
+    if ($Name -eq "next_monthly_trade_item_id" -and $Path -eq '$.market.next_monthly_trade_item_id') {
+        return
+    }
+
     # *_by_id fields are maps keyed by ID. JSON object keys are already strings;
     # the map values are facts such as counts or nested objects, not ID scalars.
     if ($Name -match '_by_id$') {
@@ -905,6 +909,190 @@ function Test-DashboardLeaderSchema {
     }
 }
 
+function Get-MarketResourceByIndex {
+    param(
+        [object]$Market,
+        [int]$Index
+    )
+
+    if (-not (Has-JsonProperty $Market "resources")) {
+        return $null
+    }
+
+    foreach ($property in $Market.resources.PSObject.Properties) {
+        $resource = $property.Value
+        if ($resource -is [System.Management.Automation.PSCustomObject] -and
+            (Has-JsonProperty $resource "index") -and
+            [int]$resource.index -eq $Index) {
+            return $resource
+        }
+    }
+
+    return $null
+}
+
+function Test-DashboardMarketSchema {
+    param(
+        [object]$Json,
+        [string]$Path
+    )
+
+    if (-not (Has-JsonProperty $Json "market")) {
+        return
+    }
+
+    $market = $Json.market
+    if ($market -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path market must be a JSON object"
+    }
+
+    if (-not (Has-JsonProperty $market "enabled") -or $market.enabled -isnot [bool]) {
+        throw "$Path market.enabled must exist and be boolean"
+    }
+
+    if ((Has-JsonProperty $market "galactic_market_country") -and
+        $null -ne $market.galactic_market_country -and
+        $market.galactic_market_country -isnot [string]) {
+        throw "$Path market.galactic_market_country must be a string when present"
+    }
+
+    if ((Has-JsonProperty $market "next_monthly_trade_item_id") -and
+        $null -ne $market.next_monthly_trade_item_id) {
+        Test-JsonNumber $market.next_monthly_trade_item_id "$Path.market.next_monthly_trade_item_id"
+    }
+
+    if (-not (Has-JsonProperty $market "resource_order") -or $market.resource_order -isnot [System.Array]) {
+        throw "$Path market.resource_order must exist and be an array"
+    }
+
+    if (-not (Has-JsonProperty $market "resources") -or $market.resources -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path market.resources must exist and be an object"
+    }
+
+    if (-not (Has-JsonProperty $market "player_market_activity") -or $market.player_market_activity -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path market.player_market_activity must exist"
+    }
+
+    if (-not (Has-JsonProperty $market.player_market_activity "country_id") -or $market.player_market_activity.country_id -isnot [string]) {
+        throw "$Path market.player_market_activity.country_id must be string"
+    }
+
+    if (-not (Has-JsonProperty $market "price_derivation_status") -or $market.price_derivation_status -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path market.price_derivation_status must exist"
+    }
+
+    if (-not (Has-JsonProperty $market.price_derivation_status "available") -or $market.price_derivation_status.available -isnot [bool]) {
+        throw "$Path market.price_derivation_status.available must exist and be boolean"
+    }
+
+    if ($market.price_derivation_status.available -ne $false) {
+        throw "$Path market.price_derivation_status.available must be false until price derivation is implemented"
+    }
+
+    if (-not (Has-JsonProperty $market "all_country_market_activity_summary") -or
+        $market.all_country_market_activity_summary -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path market.all_country_market_activity_summary must exist"
+    }
+
+    foreach ($requiredActivityMap in @("resources_bought", "resources_sold", "net_bought", "internal_market_fluctuations")) {
+        if (-not (Has-JsonProperty $market.player_market_activity $requiredActivityMap) -or
+            $market.player_market_activity.PSObject.Properties[$requiredActivityMap].Value -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$Path market.player_market_activity.$requiredActivityMap must be an object"
+        }
+    }
+
+    foreach ($requiredSummaryMap in @("total_bought_by_resource", "total_sold_by_resource", "net_bought_by_resource")) {
+        if (-not (Has-JsonProperty $market.all_country_market_activity_summary $requiredSummaryMap) -or
+            $market.all_country_market_activity_summary.PSObject.Properties[$requiredSummaryMap].Value -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$Path market.all_country_market_activity_summary.$requiredSummaryMap must be an object"
+        }
+    }
+
+    if (-not (Has-JsonProperty $market.all_country_market_activity_summary "country_count_with_market_activity")) {
+        throw "$Path market.all_country_market_activity_summary.country_count_with_market_activity is missing"
+    }
+    Test-JsonNumber $market.all_country_market_activity_summary.country_count_with_market_activity "$Path.market.all_country_market_activity_summary.country_count_with_market_activity"
+
+    foreach ($expected in @(
+        @{ Index = 0; Name = "energy" },
+        @{ Index = 1; Name = "minerals" },
+        @{ Index = 2; Name = "food" },
+        @{ Index = 10; Name = "alloys" }
+    )) {
+        if (@($market.resource_order).Count -gt [int]$expected.Index) {
+            if (-not (Has-JsonProperty $market.resources $expected.Name)) {
+                throw "$Path market.resources.$($expected.Name) should exist because index $($expected.Index) exists"
+            }
+        }
+    }
+
+    foreach ($resourceProperty in $market.resources.PSObject.Properties) {
+        $resourcePath = "$Path.market.resources.$($resourceProperty.Name)"
+        $resource = $resourceProperty.Value
+
+        if ($resource -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$resourcePath must be an object"
+        }
+
+        foreach ($requiredField in @("index", "resource", "category", "galactic_market_resource", "global_fluctuation", "player_bought", "player_sold", "player_net_bought", "player_internal_fluctuation", "observed_buy_price", "observed_sell_price")) {
+            if (-not (Has-JsonProperty $resource $requiredField)) {
+                throw "$resourcePath is missing $requiredField"
+            }
+        }
+
+        Test-JsonNumber $resource.index "$resourcePath.index"
+
+        if ($resource.resource -isnot [string]) {
+            throw "$resourcePath.resource must be string"
+        }
+
+        if ($resource.category -isnot [string]) {
+            throw "$resourcePath.category must be string"
+        }
+
+        if ($null -ne $resource.global_fluctuation) {
+            Test-JsonNumber $resource.global_fluctuation "$resourcePath.global_fluctuation"
+        }
+
+        if ($null -ne $resource.galactic_market_resource -and $resource.galactic_market_resource -isnot [bool]) {
+            throw "$resourcePath.galactic_market_resource must be boolean/null"
+        }
+
+        Test-JsonNumber $resource.player_bought "$resourcePath.player_bought"
+        Test-JsonNumber $resource.player_sold "$resourcePath.player_sold"
+        Test-JsonNumber $resource.player_net_bought "$resourcePath.player_net_bought"
+
+        if ($null -ne $resource.player_internal_fluctuation) {
+            Test-JsonNumber $resource.player_internal_fluctuation "$resourcePath.player_internal_fluctuation"
+        }
+
+        $expectedNet = [double]$resource.player_bought - [double]$resource.player_sold
+        if ([Math]::Abs(([double]$resource.player_net_bought) - $expectedNet) -gt 0.000001) {
+            throw "$resourcePath.player_net_bought must equal player_bought - player_sold"
+        }
+
+        if ($market.price_derivation_status.available -ne $true) {
+            if ($null -ne $resource.observed_buy_price -or $null -ne $resource.observed_sell_price) {
+                throw "$resourcePath observed prices must be null unless price_derivation_status.available=true"
+            }
+        }
+    }
+
+    foreach ($indexCheck in @(
+        @{ Index = 0; Name = "energy" },
+        @{ Index = 1; Name = "minerals" },
+        @{ Index = 2; Name = "food" },
+        @{ Index = 10; Name = "alloys" }
+    )) {
+        if (@($market.resource_order).Count -gt [int]$indexCheck.Index) {
+            $byIndex = Get-MarketResourceByIndex $market ([int]$indexCheck.Index)
+            if ($null -eq $byIndex -or $byIndex.resource -ne $indexCheck.Name) {
+                throw "$Path market resource index $($indexCheck.Index) must map to $($indexCheck.Name)"
+            }
+        }
+    }
+}
+
 function Test-GeneratedJson {
     $OutputDir = Join-Path $Root "output"
 
@@ -979,6 +1167,7 @@ function Test-GeneratedJson {
         Test-CountryJsonTree $json '$'
         Test-DashboardFleetSchema $json $file.FullName
         Test-DashboardLeaderSchema $json $file.FullName
+        Test-DashboardMarketSchema $json $file.FullName
 
         if ($file.Name -notmatch '_\d{4}-\d{2}-\d{2}\.json$') {
             throw "$($file.FullName) must include a _YYYY-MM-DD suffix before .json"
@@ -1116,6 +1305,9 @@ function Test-GeneratedJson {
             "ship_design_count",
             "resolved_design_count",
             "unresolved_design_references",
+            "market_resource_count",
+            "market_unknown_resource_indices",
+            "market_array_length_warnings",
             "resource_value_available",
             "unresolved_name_count",
             "unresolved_name_kinds",
