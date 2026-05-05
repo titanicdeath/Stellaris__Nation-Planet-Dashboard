@@ -207,8 +207,105 @@ std::string make_display_name_from_key(const std::string& value) {
     return trim(s);
 }
 
+std::string title_case_leader_name(std::string s) {
+    bool cap_next = true;
+    for (char& c : s) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (std::isalpha(uc)) {
+            c = cap_next ? static_cast<char>(std::toupper(uc)) : static_cast<char>(std::tolower(uc));
+            cap_next = false;
+        } else {
+            cap_next = (c == ' ' || c == '-' || c == '\t' || c == '\r' || c == '\n');
+        }
+    }
+    return trim(s);
+}
+
+std::string make_leader_name_part_from_key(const std::string& value) {
+    std::string s = trim(value);
+    if (s.empty()) return s;
+
+    const std::string chr_marker = "_CHR_";
+    const size_t chr_pos = s.find(chr_marker);
+    if (chr_pos != std::string::npos && chr_pos + chr_marker.size() < s.size()) {
+        const std::string prefix = s.substr(0, chr_pos);
+        bool safe_prefix = !prefix.empty();
+        bool has_alpha = false;
+        for (unsigned char c : prefix) {
+            if (std::isalpha(c)) {
+                has_alpha = true;
+                if (!std::isupper(c)) {
+                    safe_prefix = false;
+                    break;
+                }
+            } else if (!std::isdigit(c)) {
+                safe_prefix = false;
+                break;
+            }
+        }
+        if (safe_prefix && has_alpha) s = s.substr(chr_pos + chr_marker.size());
+    } else if (is_generated_name_key(s)) {
+        s = make_display_name_from_key(s);
+    }
+
+    std::replace(s.begin(), s.end(), '_', ' ');
+    return title_case_leader_name(s);
+}
+
 bool is_unresolved_name(const std::string& value) {
     return is_hard_unresolved_name(value);
+}
+
+std::optional<int> parse_positive_int_component(const std::string& value) {
+    if (value.empty()) return std::nullopt;
+    int out = 0;
+    for (unsigned char c : value) {
+        if (!std::isdigit(c)) return std::nullopt;
+        out = (out * 10) + (c - '0');
+    }
+    return out;
+}
+
+bool is_valid_stellaris_date(const StellarisDate& d) {
+    return d.year > 0 && d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= 31;
+}
+
+std::optional<StellarisDate> parse_stellaris_date(const std::string& value) {
+    const std::string s = trim(value);
+    const size_t p1 = s.find('.');
+    if (p1 == std::string::npos) return std::nullopt;
+    const size_t p2 = s.find('.', p1 + 1);
+    if (p2 == std::string::npos || s.find('.', p2 + 1) != std::string::npos) return std::nullopt;
+
+    auto year = parse_positive_int_component(s.substr(0, p1));
+    auto month = parse_positive_int_component(s.substr(p1 + 1, p2 - p1 - 1));
+    auto day = parse_positive_int_component(s.substr(p2 + 1));
+    if (!year || !month || !day) return std::nullopt;
+
+    StellarisDate d{*year, *month, *day};
+    if (!is_valid_stellaris_date(d)) return std::nullopt;
+    return d;
+}
+
+std::optional<int> years_between_stellaris_dates(const std::string& start, const std::string& end) {
+    auto s = parse_stellaris_date(start);
+    auto e = parse_stellaris_date(end);
+    if (!s || !e) return std::nullopt;
+    int years = e->year - s->year;
+    if (e->month < s->month || (e->month == s->month && e->day < s->day)) --years;
+    if (years < 0) return std::nullopt;
+    return years;
+}
+
+std::optional<int> days_between_stellaris_dates(const std::string& start, const std::string& end) {
+    auto s = parse_stellaris_date(start);
+    auto e = parse_stellaris_date(end);
+    if (!s || !e) return std::nullopt;
+    const int start_days = (s->year * 360) + ((s->month - 1) * 30) + (s->day - 1);
+    const int end_days = (e->year * 360) + ((e->month - 1) * 30) + (e->day - 1);
+    const int diff = end_days - start_days;
+    if (diff < 0) return std::nullopt;
+    return diff;
 }
 
 // ================================================================

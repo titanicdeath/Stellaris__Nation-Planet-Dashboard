@@ -23,4 +23,15 @@ std::string output_date_suffix(const std::string& date);
 bool is_hard_unresolved_name(const std::string& value);
 bool is_generated_name_key(const std::string& value);
 std::string make_display_name_from_key(const std::string& value);
+std::string make_leader_name_part_from_key(const std::string& value);
 bool is_unresolved_name(const std::string& value);
+
+struct StellarisDate {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+};
+
+std::optional<StellarisDate> parse_stellaris_date(const std::string& value);
+std::optional<int> years_between_stellaris_dates(const std::string& start, const std::string& end);
+std::optional<int> days_between_stellaris_dates(const std::string& start, const std::string& end);

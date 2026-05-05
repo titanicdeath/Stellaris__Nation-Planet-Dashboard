@@ -204,6 +204,25 @@ function Get-JsonItemCount {
     return 1
 }
 
+function Test-JsonNumber {
+    param(
+        [object]$Value,
+        [string]$Path
+    )
+
+    if ($Value -is [byte] -or
+        $Value -is [int16] -or
+        $Value -is [int] -or
+        $Value -is [int64] -or
+        $Value -is [single] -or
+        $Value -is [double] -or
+        $Value -is [decimal]) {
+        return
+    }
+
+    throw "$Path must be numeric"
+}
+
 function Test-IsHardUnresolvedDisplayName {
     param([string]$Value)
 
@@ -285,7 +304,8 @@ function Test-GeneratedDisplayNameField {
     }
 
     $allowedGeneratedFormatKeys = @("SUFFIX_NAME_FORMAT")
-    if ((Test-IsHardUnresolvedDisplayName $rawValue) -and ($allowedGeneratedFormatKeys -notcontains $rawValue)) {
+    $isLeaderTemplateKey = $rawValue -match '^%LEADER_[0-9]+%$'
+    if ((Test-IsHardUnresolvedDisplayName $rawValue) -and ($allowedGeneratedFormatKeys -notcontains $rawValue) -and -not $isLeaderTemplateKey) {
         throw "${Path}.${RawField} contains hard unresolved placeholder '$rawValue' but is marked as generated fallback"
     }
 }
@@ -767,6 +787,124 @@ function Test-DashboardFleetSchema {
     }
 }
 
+function Test-DashboardLeaderSchema {
+    param(
+        [object]$Json,
+        [string]$Path
+    )
+
+    if (-not (Has-JsonProperty $Json "leaders")) {
+        throw "$Path is missing top-level leaders"
+    }
+
+    if ($Json.leaders -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Path leaders must be a JSON object"
+    }
+
+    foreach ($requiredValidationField in @(
+        "leader_count",
+        "leaders_missing_names",
+        "leaders_with_calculated_age",
+        "leaders_with_service_length",
+        "leader_date_parse_warnings"
+    )) {
+        if (-not (Has-JsonProperty $Json.validation $requiredValidationField)) {
+            throw "$Path is missing validation.$requiredValidationField"
+        }
+    }
+
+    foreach ($leaderProperty in $Json.leaders.PSObject.Properties) {
+        $leader = $leaderProperty.Value
+        $leaderPath = "$Path.leaders.$($leaderProperty.Name)"
+
+        if ($leader -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "$leaderPath must be an object"
+        }
+
+        if (-not (Has-JsonProperty $leader "leader_id") -or $leader.leader_id -isnot [string]) {
+            throw "$leaderPath.leader_id must be a string"
+        }
+
+        if (-not (Has-JsonProperty $leader "name")) {
+            throw "$leaderPath is missing name"
+        }
+
+        if ($leader.name -isnot [string]) {
+            throw "$leaderPath.name must be a string"
+        }
+
+        if ([string]::IsNullOrEmpty($leader.name)) {
+            throw "$leaderPath.name must not be empty"
+        }
+
+        if ((([string]$leader.name).Contains('%') -or ([string]$leader.name).Contains('$')) -and
+            ((-not (Has-JsonProperty $leader "name_unresolved")) -or $leader.name_unresolved -ne $true)) {
+            throw "$leaderPath.name contains a hard placeholder but name_unresolved is not true"
+        }
+
+        if ((Has-JsonProperty $leader "name_generated_from_key") -and $leader.name_generated_from_key -eq $true -and
+            (-not (Has-JsonProperty $leader "name_raw"))) {
+            throw "$leaderPath.name_generated_from_key requires name_raw"
+        }
+
+        foreach ($stringField in @("gender", "species", "country", "creator", "planet")) {
+            if ((Has-JsonProperty $leader $stringField) -and
+                $null -ne $leader.PSObject.Properties[$stringField].Value -and
+                $leader.PSObject.Properties[$stringField].Value -isnot [string]) {
+                throw "$leaderPath.$stringField must be a string when present"
+            }
+        }
+
+        foreach ($locationField in @("location", "council_location")) {
+            if ((Has-JsonProperty $leader $locationField) -and
+                $null -ne $leader.PSObject.Properties[$locationField].Value -and
+                (Has-JsonProperty $leader.PSObject.Properties[$locationField].Value "id") -and
+                $null -ne $leader.PSObject.Properties[$locationField].Value.id -and
+                $leader.PSObject.Properties[$locationField].Value.id -isnot [string]) {
+                throw "$leaderPath.$locationField.id must be a string when present"
+            }
+        }
+
+        if (Has-JsonProperty $leader "birth_date") {
+            if (-not (Has-JsonProperty $leader "age_years")) {
+                throw "$leaderPath.birth_date is present but age_years is missing"
+            }
+            Test-JsonNumber $leader.age_years "$leaderPath.age_years"
+        }
+
+        if (Has-JsonProperty $leader "service_start_date") {
+            if (-not (Has-JsonProperty $leader "service_length_years")) {
+                throw "$leaderPath.service_start_date is present but service_length_years is missing"
+            }
+            Test-JsonNumber $leader.service_length_years "$leaderPath.service_length_years"
+        }
+    }
+
+    $leaderObjectCount = @($Json.leaders.PSObject.Properties).Count
+    if ([int]$Json.validation.leader_count -ne $leaderObjectCount) {
+        throw "$Path validation.leader_count must equal top-level leaders object count"
+    }
+
+    if (Has-JsonProperty $Json.leaders "83886397") {
+        $leader = $Json.leaders."83886397"
+        $leaderPath = "$Path.leaders.83886397"
+        if ($leader.name -ne "Phrin-Thoon Loshh") { throw "$leaderPath.name must be Phrin-Thoon Loshh" }
+        if ($leader.gender -ne "male") { throw "$leaderPath.gender must be male" }
+        if ($leader.birth_date -ne "2264.01.01") { throw "$leaderPath.birth_date must be 2264.01.01" }
+        if ($leader.date_added -ne "2295.01.01") { throw "$leaderPath.date_added must be 2295.01.01" }
+        if ($leader.recruitment_date -ne "2297.08.19") { throw "$leaderPath.recruitment_date must be 2297.08.19" }
+        if ($leader.service_start_date -ne "2295.01.01") { throw "$leaderPath.service_start_date must be 2295.01.01" }
+        Test-JsonNumber $leader.age_years "$leaderPath.age_years"
+        Test-JsonNumber $leader.service_length_years "$leaderPath.service_length_years"
+        if ((Has-JsonProperty $leader "location") -and (Has-JsonProperty $leader.location "id") -and $leader.location.id -isnot [string]) {
+            throw "$leaderPath.location.id must be a string"
+        }
+        if ((Has-JsonProperty $leader "council_location") -and (Has-JsonProperty $leader.council_location "id") -and $leader.council_location.id -isnot [string]) {
+            throw "$leaderPath.council_location.id must be a string"
+        }
+    }
+}
+
 function Test-GeneratedJson {
     $OutputDir = Join-Path $Root "output"
 
@@ -840,6 +978,7 @@ function Test-GeneratedJson {
 
         Test-CountryJsonTree $json '$'
         Test-DashboardFleetSchema $json $file.FullName
+        Test-DashboardLeaderSchema $json $file.FullName
 
         if ($file.Name -notmatch '_\d{4}-\d{2}-\d{2}\.json$') {
             throw "$($file.FullName) must include a _YYYY-MM-DD suffix before .json"
@@ -861,6 +1000,7 @@ function Test-GeneratedJson {
             "systems",
             "fleets",
             "ship_designs",
+            "leaders",
             "army_formations"
         )) {
             if (-not (Has-JsonProperty $json $requiredTopLevel)) {
@@ -980,7 +1120,13 @@ function Test-GeneratedJson {
             "unresolved_name_count",
             "unresolved_name_kinds",
             "generated_name_key_count",
-            "generated_name_key_kinds"
+            "generated_name_key_kinds",
+            "leader_count",
+            "leaders_with_generated_names",
+            "leaders_missing_names",
+            "leaders_with_calculated_age",
+            "leaders_with_service_length",
+            "leader_date_parse_warnings"
         )) {
             if (-not (Has-JsonProperty $json.validation $requiredValidationField)) {
                 throw "$($file.FullName) is missing validation.$requiredValidationField"

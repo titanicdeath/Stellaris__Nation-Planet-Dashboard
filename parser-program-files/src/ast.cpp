@@ -161,6 +161,7 @@ bool is_json_id_reference_field(const std::string& key) {
         "home_planet",
         "species",
         "country",
+        "creator",
         "heir",
         "council_positions",
         "subjects",
@@ -205,7 +206,7 @@ void write_id_array(JsonWriter& j, const std::set<std::string>& ids) {
 
 bool should_stringify_schema_scalar(const std::string& current_key, const std::string& parent_key) {
     if (parent_key == "coordinate" && current_key == "origin") return false;
-    if (current_key == "id" && parent_key == "location") return true;
+    if (current_key == "id" && (parent_key == "location" || parent_key == "council_location")) return true;
     return is_json_id_reference_field(current_key);
 }
 

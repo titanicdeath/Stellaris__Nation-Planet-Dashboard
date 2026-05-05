@@ -163,6 +163,25 @@ Both are keyed objects where keys are IDs referenced from the selected country c
 - unresolved entries are mirrored in `warnings.unresolved_references`
 - resolved display names may include `name_unresolved=true`; species adjectives may include `adjective_unresolved=true`
 
+Resolved leader entries include `leader_id`, `name`, class/level/species/country/portrait fields when available, traits, and location data. Leader names are resolved from structured save `name.full_names` data before falling back to raw keys:
+
+- literal `full_names={ key="..." literal=yes }` values use the key as `name`
+- generated `%LEADER_2%` values use variables `1` and `2`, strip safe `*_CHR_` prefixes such as `LITHOID3_CHR_`, replace underscores with spaces, normalize hyphenated casing, and join the parts with one space
+- one-part `%LEADER_1%` and similar templates use the available variable values
+- generated leader names preserve the template in `name_raw` and emit `name_generated_from_key=true`
+- if generation fails, the best raw key is emitted; hard placeholders keep `name_unresolved=true` and add an unresolved-name warning
+
+Leader lifecycle/profile fields are emitted when present or derivable:
+
+- `gender`, `tier`, `experience`, `job`, `ethic`, `planet`, and `creator`
+- `location` and `council_location`, with nested `id` values as strings
+- `birth_date` from save field `date`
+- `date_added` and `recruitment_date` preserved from the save
+- `service_start_date`, preferring `date_added` and falling back to `recruitment_date`
+- `age_years`, calculated from `birth_date` to `save.game_date`
+- `service_length_years` and `service_length_days`, calculated from `service_start_date` to `save.game_date`
+- `raw_age`, preserving save field `age`; values such as `age=0` are not trusted as authoritative
+
 ## Unresolved Localisation Diagnostics
 
 This milestone does not resolve full Stellaris localisation. Instead, it separates hard unresolved placeholders from readable generated keys.
@@ -311,6 +330,12 @@ Current top-level validation fields include:
 - `unresolved_name_kinds`: Counts grouped by broad display kind, such as `planet`, `species`, `country`, `country_adjective`, `leader`, `fleet`, `army_formation`, `system`, and `capital_planet`.
 - `generated_name_key_count`: Total readable generated-key display fields cleaned into fallback names.
 - `generated_name_key_kinds`: Counts grouped by the same broad display kinds for cleaned generated keys.
+- `leader_count`: Number of top-level leader objects exported.
+- `leaders_with_generated_names`: Number of top-level leaders with `name_generated_from_key=true`.
+- `leaders_missing_names`: Number of top-level leaders where no usable name could be produced after fallbacks.
+- `leaders_with_calculated_age`: Number of top-level leaders with calculated `age_years`.
+- `leaders_with_service_length`: Number of top-level leaders with calculated `service_length_years`.
+- `leader_date_parse_warnings`: Number of leader date parse or impossible date calculation warnings.
 - `colonies_missing_systems`
 - `systems_exported_count`
 - `colony_systems_exported_count`
@@ -404,3 +429,11 @@ Current top-level validation fields include:
 - Added top-level `ship_designs` containing only designs referenced by exported ships.
 - Added top-level military and validation rollups for fleet, ship, design, and resource-value availability counts.
 - Kept non-military fleets, stations, civilian ships, transports, and defense armies suppressed from navy output.
+
+## Milestone 5D Leader Name and Service Enrichment
+
+- Added structured leader-name generation from `name.full_names`, including literal names and `%LEADER_1%`/`%LEADER_2%` variable templates.
+- Preserved generated leader templates in `name_raw` with `name_generated_from_key=true`; unresolved fallbacks keep `name_unresolved=true`.
+- Added leader profile fields for gender, tier, experience, job, ethic, creator, planet, location, and council location.
+- Added lifecycle fields: `birth_date`, `date_added`, `recruitment_date`, `service_start_date`, calculated `age_years`, calculated service length, and `raw_age`.
+- Added leader validation counters and build-time leader schema checks.
